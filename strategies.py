@@ -23,8 +23,11 @@ class StrategyManager:
         self.config = config
         
         # Registrar estrategias disponibles
+        from strategies.turtle_soup_fvg_strategy import TurtleSoupFVGStrategy
+        
         self.strategies = {
             'default': DefaultStrategy(config),
+            'turtle_soup_fvg': TurtleSoupFVGStrategy(config),
             # Aquí se agregarán más estrategias
             # 'rsi_strategy': RSIStrategy(config),
             # 'moving_average': MovingAverageStrategy(config),

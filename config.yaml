@@ -25,8 +25,13 @@ trading_hours:
 
 # Estrategia activa
 strategy:
-  name: "default"  # Nombre de la estrategia a usar
-  # Las estrategias se definirán en strategies.py
+  name: "turtle_soup_fvg"  # Nombre de la estrategia a usar
+  # Estrategias disponibles: "default", "turtle_soup_fvg"
+  
+# Configuración específica de estrategia
+strategy_config:
+  entry_timeframe: "M5"  # Temporalidad de entrada: "M1" o "M5" (o superior)
+  min_rr: 2.0  # Risk/Reward mínimo (1:2)
 
 # Configuración de riesgo
 risk_management:

@@ -21,6 +21,7 @@ from .order_executor import (
     buy_order,
     sell_order,
 )
+from .turtle_soup_detector import detect_turtle_soup_h4, TurtleSoupDetector
 
 __all__ = [
     # Candle Reader
@@ -44,5 +45,8 @@ __all__ = [
     'create_order_executor',
     'buy_order',
     'sell_order',
+    # Turtle Soup Detector
+    'detect_turtle_soup_h4',
+    'TurtleSoupDetector',
 ]
 
