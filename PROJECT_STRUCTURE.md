@@ -36,10 +36,12 @@ BOT OF TRADING/
     ├── candle_reader.py           # Lector de velas
     ├── fvg_detector.py            # Detector de FVG
     ├── news_checker.py            # Verificador de noticias
+    ├── order_executor.py          # Ejecutor de órdenes MT5
     └── Documentation/            # Documentación de módulos
         ├── CANDLE_READER_DOCS.md
         ├── FVG_DETECTOR_DOCS.md
-        └── NEWS_CHECKER_DOCS.md
+        ├── NEWS_CHECKER_DOCS.md
+        └── ORDER_EXECUTOR_DOCS.md
 ```
 
 ---
@@ -167,9 +169,16 @@ strategies/
    - Verifica noticias económicas de alto impacto
    - Solo muestra noticias pendientes (futuras)
 
+4. **`order_executor.py`**
+   - Clase: `OrderExecutor`
+   - Funciones: `buy_order()`, `sell_order()`
+   - Ejecuta órdenes de compra y venta en MT5
+   - Normaliza precios y volúmenes automáticamente
+   - Soporta stop loss y take profit
+
 **Importar**:
 ```python
-from Base import get_candle, detect_fvg, can_trade_now
+from Base import get_candle, detect_fvg, can_trade_now, OrderExecutor
 ```
 
 **Documentación**: Ver `Base/Documentation/`

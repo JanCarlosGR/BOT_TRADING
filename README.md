@@ -16,6 +16,7 @@ Bot de trading automatizado con soporte multi-estrategia, gestión de horarios o
   - 📊 Lector de velas (`candle_reader.py`)
   - 📈 Detector de FVG - Fair Value Gap (`fvg_detector.py`)
   - 📰 Verificador de noticias económicas (`news_checker.py`)
+  - 💹 Ejecutor de órdenes MT5 (`order_executor.py`) - **NUEVO**
 
 ## Instalación
 
@@ -198,6 +199,42 @@ print(summary)
 
 ---
 
+### 💹 4. Ejecutor de Órdenes (`order_executor.py`)
+
+Ejecuta órdenes de compra y venta en MT5 de forma segura y reutilizable.
+
+**📚 Documentación completa:** [Base/Documentation/ORDER_EXECUTOR_DOCS.md](Base/Documentation/ORDER_EXECUTOR_DOCS.md)
+
+**Uso básico:**
+```python
+from Base import OrderExecutor
+
+executor = OrderExecutor()
+
+# Compra simple
+result = executor.buy('EURUSD', volume=0.1)
+if result['success']:
+    print(f"✅ Orden ejecutada: {result['order_ticket']}")
+
+# Venta con stop loss y take profit
+result = executor.sell(
+    symbol='EURUSD',
+    volume=0.1,
+    stop_loss=1.0950,
+    take_profit=1.1100
+)
+```
+
+**Características:**
+- ✅ Ejecuta órdenes de compra (BUY) y venta (SELL)
+- ✅ Normalización automática de precios y volúmenes
+- ✅ Soporte para stop loss y take profit
+- ✅ Validación de parámetros
+- ✅ Cerrar posiciones existentes
+- ✅ Obtener posiciones abiertas
+
+---
+
 ### 🔗 Importar desde Base
 
 Todas las funciones principales están disponibles desde `Base`:
@@ -208,7 +245,10 @@ from Base import (
     get_candle,              # Lector de velas
     detect_fvg,              # Detector de FVG
     can_trade_now,           # Verificar noticias
-    get_daily_news_summary   # Resumen de noticias
+    get_daily_news_summary,  # Resumen de noticias
+    OrderExecutor,            # Ejecutor de órdenes
+    buy_order,                # Función rápida de compra
+    sell_order                # Función rápida de venta
 )
 ```
 
@@ -233,14 +273,19 @@ class MiEstrategia(BaseStrategy):
         return None
 ```
 
-**Ejemplo usando módulos de Base:**
+**Ejemplo usando módulos de Base (con ejecución de órdenes):**
 ```python
-from Base import can_trade_now, detect_fvg, get_candle
+from Base import can_trade_now, detect_fvg, OrderExecutor
 from strategies import BaseStrategy
 import numpy as np
 from typing import Optional, Dict
 
 class EstrategiaCompleta(BaseStrategy):
+    def __init__(self, config: Dict):
+        super().__init__(config)
+        self.executor = OrderExecutor()
+        self.volume = config.get('risk_management', {}).get('volume', 0.1)
+    
     def analyze(self, symbol: str, rates: np.ndarray) -> Optional[Dict]:
         # 1. Verificar noticias primero
         can_trade, reason, next_news = can_trade_now(symbol)
@@ -250,11 +295,30 @@ class EstrategiaCompleta(BaseStrategy):
         
         # 2. Detectar FVG
         fvg = detect_fvg(symbol, 'H4')
-        if fvg and fvg['fvg_filled_completely']:
-            # 3. Obtener vela actual
-            candle = get_candle('H4', 'ahora', symbol)
-            if candle and candle['is_bullish']:
-                return self._create_signal('BUY', symbol, rates[-1]['close'])
+        if fvg and fvg['fvg_filled_completely'] and fvg['exited_fvg']:
+            current_price = rates[-1]['close']
+            
+            # 3. Ejecutar orden según señal
+            if fvg['exit_direction'] == 'ALCISTA':
+                result = self.executor.buy(
+                    symbol=symbol,
+                    volume=self.volume,
+                    stop_loss=fvg['fvg_bottom'],
+                    take_profit=current_price + fvg['fvg_size'] * 2,
+                    comment="FVG Strategy"
+                )
+                if result['success']:
+                    return {'action': 'BUY_EXECUTED', 'ticket': result['order_ticket']}
+            elif fvg['exit_direction'] == 'BAJISTA':
+                result = self.executor.sell(
+                    symbol=symbol,
+                    volume=self.volume,
+                    stop_loss=fvg['fvg_top'],
+                    take_profit=current_price - fvg['fvg_size'] * 2,
+                    comment="FVG Strategy"
+                )
+                if result['success']:
+                    return {'action': 'SELL_EXECUTED', 'ticket': result['order_ticket']}
         
         return None
 ```
