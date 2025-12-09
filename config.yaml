@@ -1,0 +1,42 @@
+# Configuración del Bot de Trading
+# ===================================
+
+# Credenciales MT5
+mt5:
+  login: 1520857747  # Número de cuenta MT5
+  password: "T@7$ykEuL3"  # Master password (para trading)
+  server: "FTMO-Demo2"  # Servidor del broker
+  path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"  # Ruta a MT5 (opcional, dejar vacío si MT5 está en PATH)
+
+# Activos a operar
+symbols:
+  - "EURUSD"
+  - "GBPUSD"
+  # Agregar más activos según necesites
+  # - "USDJPY"
+  # - "AUDUSD"
+
+# Horario operativo (horario de Nueva York - ET/EST)
+trading_hours:
+  enabled: true
+  start_time: "09:00"  # Hora de inicio (formato HH:MM)
+  end_time: "13:00"    # Hora de fin (formato HH:MM)
+  timezone: "America/New_York"  # Zona horaria
+
+# Estrategia activa
+strategy:
+  name: "default"  # Nombre de la estrategia a usar
+  # Las estrategias se definirán en strategies.py
+
+# Configuración de riesgo
+risk_management:
+  max_position_size: 0.1  # Tamaño máximo de posición (lots)
+  max_daily_trades: 10    # Máximo de operaciones por día
+  stop_loss_pips: 50      # Stop loss en pips
+  take_profit_pips: 100   # Take profit en pips
+
+# Configuración general
+general:
+  timeframe: "M15"  # Timeframe para análisis (M1, M5, M15, M30, H1, H4, D1)
+  log_level: "INFO"  # Nivel de logging (DEBUG, INFO, WARNING, ERROR)
+
