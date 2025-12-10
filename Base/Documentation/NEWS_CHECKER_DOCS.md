@@ -557,6 +557,43 @@ Para problemas o preguntas:
 
 ## 🔄 Cambios Recientes
 
+### Diciembre 2025 - Mejora en Detección de Estrellas y Logging
+
+**Cambio importante:** Se mejoró significativamente la detección de estrellas de impacto y se agregó logging detallado para depuración.
+
+**Mejoras en detección de estrellas:**
+- ✅ **6 métodos de detección** con fallback automático:
+  1. Búsqueda por clase específica `grayFullBullishIcon` (método original)
+  2. Búsqueda por clases que contengan "Bullish" o "Full"
+  3. Búsqueda por atributo `title` que contenga "star" o "estrella"
+  4. Búsqueda en elementos `<span>` (algunos sitios los usan)
+  5. Conteo de todos los íconos `<i>` y `<span>` con clases
+  6. Inferencia desde el texto de la celda (ej: "High", "Alto", números)
+
+**Logging mejorado:**
+- ✅ Logs detallados cuando se obtienen noticias del scraping
+- ✅ Muestra las primeras 5 noticias encontradas
+- ✅ Logs cuando se filtran noticias (con razón del filtrado)
+- ✅ Resumen de filtrado: total, filtradas y relevantes
+- ✅ Log cuando se detecta una noticia de alto impacto
+
+**Beneficios:**
+- ✅ Mayor robustez ante cambios en el HTML de Investing.com
+- ✅ Mejor detección de noticias importantes (FOMC, Lagarde, etc.)
+- ✅ Facilita la depuración de problemas de detección
+- ✅ Información clara sobre qué noticias se detectan y por qué
+
+**Ejemplo de logs:**
+```
+[EURUSD] Scraping de noticias: 8 noticias encontradas
+[EURUSD] Primeras noticias encontradas:
+  1. FOMC Interest Rate Decision - USD - Impacto: 3 - Hora: 2025-12-10 20:00:00
+  2. Lagarde Speech - EUR - Impacto: 3 - Hora: 2025-12-10 11:55:00
+[EURUSD] Resumen de filtrado: 8 noticias totales, 2 filtradas (impacto < 3 o holiday), 6 noticias relevantes
+```
+
+---
+
 ### Diciembre 2025 - Filtrado de Noticias Pasadas
 
 **Cambio importante:** Todas las funciones ahora filtran automáticamente las noticias pasadas y solo muestran noticias PENDIENTES (futuras).
