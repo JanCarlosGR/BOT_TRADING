@@ -324,14 +324,54 @@ def scrape_investing_calendar(
                 if currency not in currencies_to_check:
                     continue
                 
-                # Impact - contar estrellas llenas (grayFullBullishIcon)
+                # Impact - contar estrellas llenas (múltiples métodos de detección)
                 impact_cell = cells[2]
-                impact_icons = impact_cell.find_all('i', class_='grayFullBullishIcon')
-                impact_level = len(impact_icons)  # Número de estrellas llenas
                 
-                # Verificar si es un Holiday
+                # Método 1: Buscar por clase específica (grayFullBullishIcon)
+                impact_icons = impact_cell.find_all('i', class_='grayFullBullishIcon')
+                
+                # Método 2: Si no se encontraron, buscar cualquier ícono con clase que contenga "Bullish" o "Full"
+                if not impact_icons:
+                    impact_icons = impact_cell.find_all('i', class_=re.compile(r'.*[Bb]ullish.*|.*[Ff]ull.*'))
+                
+                # Método 3: Buscar por atributo title que contenga "star" o "estrella"
+                if not impact_icons:
+                    all_icons = impact_cell.find_all('i')
+                    for icon in all_icons:
+                        icon_title = icon.get('title', '').lower()
+                        icon_class = ' '.join(icon.get('class', [])).lower()
+                        if 'star' in icon_title or 'estrella' in icon_title or 'full' in icon_class:
+                            impact_icons.append(icon)
+                
+                # Método 4: Buscar también en elementos <span> (algunos sitios usan spans para estrellas)
+                if not impact_icons:
+                    impact_icons = impact_cell.find_all('span', class_=re.compile(r'.*[Bb]ullish.*|.*[Ff]ull.*|.*[Ss]tar.*'))
+                
+                # Método 5: Contar estrellas por el número de íconos en la celda (fallback)
+                if not impact_icons:
+                    # Contar todos los íconos <i> y <span> en la celda que tengan clases
+                    all_icons_in_cell = impact_cell.find_all(['i', 'span'])
+                    impact_icons = [icon for icon in all_icons_in_cell if icon.get('class')]
+                
+                # Obtener texto de la celda de impacto para verificar holidays e inferir nivel
                 impact_text = impact_cell.get_text(strip=True)
                 is_holiday = 'Holiday' in impact_text or 'holiday' in impact_text.lower()
+                
+                # Método 6: Si aún no se encontraron, intentar inferir del texto de la celda
+                impact_level = len(impact_icons)  # Número de estrellas llenas
+                if impact_level == 0 and not is_holiday:
+                    # Intentar inferir del texto (ej: "High", "Alto", "3", etc.)
+                    impact_text_lower = impact_text.lower()
+                    if 'high' in impact_text_lower or 'alto' in impact_text_lower:
+                        impact_level = 3  # Asumir alto impacto si dice "high"
+                    elif 'medium' in impact_text_lower or 'medio' in impact_text_lower:
+                        impact_level = 2
+                    elif 'low' in impact_text_lower or 'bajo' in impact_text_lower:
+                        impact_level = 1
+                    # Buscar números en el texto (ej: "3 stars", "3 estrellas")
+                    number_match = re.search(r'(\d+)', impact_text)
+                    if number_match:
+                        impact_level = int(number_match.group(1))
                 
                 # Si es un holiday, marcarlo pero no filtrarlo (necesitamos saber qué días son festivos)
                 if is_holiday:
@@ -370,7 +410,7 @@ def scrape_investing_calendar(
                 
                 # Validación adicional: asegurar que solo se agreguen noticias de 3 estrellas (o holidays)
                 if is_holiday or impact_level >= min_impact:
-                    news_list.append({
+                    news_item = {
                         'time': event_date,
                         'time_str': time_str_full,
                         'currency': currency,
@@ -381,7 +421,12 @@ def scrape_investing_calendar(
                         'actual': actual,
                         'forecast': forecast,
                         'previous': previous,
-                    })
+                    }
+                    news_list.append(news_item)
+                    # Logging para depuración (solo para noticias de alto impacto)
+                    if impact_level >= 3 and not is_holiday:
+                        logger.debug(f"Noticia detectada: {event_text} - {currency} - "
+                                   f"Impacto: {impact_level} - Hora: {time_str_full}")
                 
             except Exception as e:
                 # Continuar con la siguiente fila si hay error
@@ -688,11 +733,22 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
     # Obtener todas las noticias de hoy y próximas horas (para USD/EUR, 3 estrellas)
     all_news = scrape_investing_calendar(symbol, min_impact=3, currencies=['USD', 'EUR'], hours_ahead=24)
     
+    # Logging para depuración
+    logger.debug(f"[{symbol}] Scraping de noticias: {len(all_news) if all_news else 0} noticias encontradas")
+    if all_news:
+        logger.debug(f"[{symbol}] Primeras noticias encontradas:")
+        for i, news in enumerate(all_news[:5]):  # Mostrar primeras 5
+            logger.debug(f"  {i+1}. {news.get('title', 'N/A')} - {news.get('currency', 'N/A')} - "
+                        f"Impacto: {news.get('impact_level', news.get('impact', 0))} - "
+                        f"Hora: {news.get('time_str', 'N/A')}")
+    
     if not all_news:
+        logger.debug(f"[{symbol}] No se encontraron noticias en el scraping. Verificando conexión y estructura HTML...")
         return True, "No hay noticias de alto impacto próximas", None
     
     # Filtrar noticias relevantes (hoy y próximas 24 horas) - SOLO 3 ESTRELLAS
     relevant_news = []
+    filtered_count = 0
     for news in all_news:
         try:
             # Validar que sea de 3 estrellas (no holidays)
@@ -702,6 +758,9 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
             
             # Solo incluir noticias de 3 estrellas (excluir holidays)
             if is_holiday or impact_level < 3:
+                filtered_count += 1
+                logger.debug(f"[{symbol}] Noticia filtrada: {news.get('title', 'N/A')} - "
+                           f"Impacto: {impact_level}, Holiday: {is_holiday}")
                 continue
             
             news_time = news.get('time')
@@ -719,10 +778,17 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
                     'currency': news.get('currency', 'N/A'),
                     'impact_level': impact_level  # Incluir nivel de impacto
                 })
-        except:
+        except Exception as e:
+            logger.debug(f"[{symbol}] Error al procesar noticia: {e}")
             continue
     
+    # Logging del resumen de filtrado
+    logger.debug(f"[{symbol}] Resumen de filtrado: {len(all_news)} noticias totales, "
+                f"{filtered_count} filtradas (impacto < 3 o holiday), "
+                f"{len(relevant_news)} noticias relevantes (3 estrellas, futuras)")
+    
     if not relevant_news:
+        logger.debug(f"[{symbol}] No hay noticias relevantes después del filtrado")
         return True, "No hay noticias de alto impacto próximas", None
     
     # Ordenar por tiempo

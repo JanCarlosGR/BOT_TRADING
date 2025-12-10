@@ -14,7 +14,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strategies import BaseStrategy
+from strategy_manager import BaseStrategy
 from Base.turtle_soup_detector import detect_turtle_soup_h4
 from Base.fvg_detector import detect_fvg
 from Base.news_checker import can_trade_now
@@ -76,32 +76,40 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         """
         try:
             # 1. Verificar noticias de alto impacto (5 min antes/después)
+            self.logger.info(f"[{symbol}] 📰 Etapa 1/4: Verificando noticias económicas...")
             if not self._check_news(symbol):
                 return None
+            self.logger.info(f"[{symbol}] ✅ Etapa 1/4: Noticias OK - Puede operar")
             
             # 2. Detectar Turtle Soup en H4
+            self.logger.info(f"[{symbol}] 🔍 Etapa 2/4: Buscando Turtle Soup en H4...")
             turtle_soup = detect_turtle_soup_h4(symbol)
             
             if not turtle_soup or not turtle_soup.get('detected'):
                 self.turtle_soup_signal = None
+                self.logger.info(f"[{symbol}] ⏸️  Etapa 2/4: Esperando - No hay Turtle Soup detectado en H4")
                 return None
             
             # Guardar señal de Turtle Soup
             self.turtle_soup_signal = turtle_soup
             
             self.logger.info(
-                f"Turtle Soup detectado: {turtle_soup['sweep_type']} | "
+                f"[{symbol}] ✅ Etapa 2/4 COMPLETA: Turtle Soup detectado - {turtle_soup['sweep_type']} | "
                 f"Barrido: {turtle_soup['swept_candle']} | "
                 f"TP: {turtle_soup['target_price']:.5f} | "
                 f"Dirección: {turtle_soup['direction']}"
             )
             
             # 3. Buscar entrada en FVG contrario al barrido
+            self.logger.info(f"[{symbol}] 🔍 Etapa 3/4: Buscando entrada en FVG ({self.entry_timeframe})...")
             entry_signal = self._find_fvg_entry(symbol, turtle_soup)
             
             if entry_signal:
                 # 4. Ejecutar orden
+                self.logger.info(f"[{symbol}] 💹 Etapa 4/4: Ejecutando orden...")
                 return self._execute_order(symbol, turtle_soup, entry_signal)
+            else:
+                self.logger.info(f"[{symbol}] ⏸️  Etapa 3/4: Esperando - No hay señal de entrada FVG válida aún")
             
             return None
             
@@ -123,7 +131,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             can_trade, reason, next_news = can_trade_now(symbol, minutes_before=5, minutes_after=5)
             
             if not can_trade:
-                self.logger.info(f"Bloqueado por noticias: {reason}")
+                if next_news:
+                    self.logger.info(f"[{symbol}] ⏸️  Bloqueado por noticias: {reason} | Próxima noticia: {next_news.get('title', 'N/A')} a las {next_news.get('time_str', 'N/A')}")
+                else:
+                    self.logger.info(f"[{symbol}] ⏸️  Bloqueado por noticias: {reason}")
                 return False
             
             return True
@@ -148,38 +159,67 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             fvg = detect_fvg(symbol, self.entry_timeframe)
             
             if not fvg:
+                self.logger.info(f"[{symbol}] ⏸️  Esperando: No hay FVG detectado en {self.entry_timeframe}")
                 return None
-            
-            # Determinar qué tipo de FVG buscamos
-            # Si el barrido fue alcista (sweep_type = BULLISH_SWEEP)
-            # → Buscamos FVG alcista para entrada bajista
-            # Si el barrido fue bajista (sweep_type = BEARISH_SWEEP)
-            # → Buscamos FVG bajista para entrada alcista
             
             sweep_type = turtle_soup.get('sweep_type')
             direction = turtle_soup.get('direction')
             fvg_type = fvg.get('fvg_type')
             
-            # Verificar que el FVG sea del tipo correcto
-            if sweep_type == 'BULLISH_SWEEP' and direction == 'BEARISH':
-                # Barrido alcista → buscamos FVG alcista para vender
-                if fvg_type != 'ALCISTA':
-                    return None
-            elif sweep_type == 'BEARISH_SWEEP' and direction == 'BULLISH':
-                # Barrido bajista → buscamos FVG bajista para comprar
-                if fvg_type != 'BAJISTA':
-                    return None
-            else:
-                return None
-            
-            # Verificar que el precio haya entrado y salido del FVG
-            if not fvg.get('entered_fvg') or not fvg.get('exited_fvg'):
-                return None
-            
-            # Verificar dirección de salida
             exit_direction = fvg.get('exit_direction')
-            if exit_direction != direction:
+            fvg_bottom = fvg.get('fvg_bottom')
+            fvg_top = fvg.get('fvg_top')
+            current_price_fvg = fvg.get('current_price')
+            self.logger.info(f"[{symbol}] 📊 FVG detectado: {fvg_type} | Estado: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')} | Exit Direction: {exit_direction}")
+            self.logger.info(f"[{symbol}] 📊 FVG detalles: Bottom={fvg_bottom:.5f} | Top={fvg_top:.5f} | Precio actual={current_price_fvg:.5f}")
+            
+            # Verificar que el precio haya entrado y salido del FVG PRIMERO
+            # Esto es lo más importante - si el precio entró y salió en la dirección correcta, proceder
+            if not fvg.get('entered_fvg'):
+                self.logger.info(f"[{symbol}] ⏸️  Esperando: El precio aún no ha entrado al FVG")
                 return None
+            
+            if not fvg.get('exited_fvg'):
+                self.logger.info(f"[{symbol}] ⏸️  Esperando: El precio entró al FVG pero aún no ha salido (Estado: {fvg.get('status')})")
+                return None
+            
+            # Verificar dirección de salida - DEBE coincidir con la dirección del Turtle Soup
+            # Normalizar exit_direction: ALCISTA -> BULLISH, BAJISTA -> BEARISH
+            normalized_exit_direction = None
+            if exit_direction == 'ALCISTA':
+                normalized_exit_direction = 'BULLISH'
+            elif exit_direction == 'BAJISTA':
+                normalized_exit_direction = 'BEARISH'
+            
+            if normalized_exit_direction != direction:
+                self.logger.info(f"[{symbol}] ⏸️  Esperando: El precio salió del FVG en dirección {exit_direction} ({normalized_exit_direction}), pero necesitamos {direction} (según Turtle Soup H4)")
+                return None
+            
+            self.logger.info(f"[{symbol}] ✅ Precio entró y salió del FVG en la dirección correcta ({direction})")
+            
+            # Determinar qué tipo de FVG buscamos según el barrido de H4
+            # LÓGICA CORREGIDA:
+            # - Barrido de HIGH (BULLISH_SWEEP) + dirección BEARISH → Busca FVG BAJISTA (formado a la baja) para vender
+            # - Barrido de LOW (BEARISH_SWEEP) + dirección BULLISH → Busca FVG ALCISTA (formado en alza) para comprar
+            # En ambos casos, esperamos que el precio entre y salga en la dirección del Turtle Soup
+            
+            # Verificar tipo de FVG según el barrido de H4
+            expected_fvg_type = None
+            if sweep_type == 'BULLISH_SWEEP' and direction == 'BEARISH':
+                # Barrido de HIGH → Busca FVG BAJISTA (formado a la baja) para entrada bajista (venta)
+                expected_fvg_type = 'BAJISTA'
+            elif sweep_type == 'BEARISH_SWEEP' and direction == 'BULLISH':
+                # Barrido de LOW → Busca FVG ALCISTA (formado en alza) para entrada alcista (compra)
+                expected_fvg_type = 'ALCISTA'
+            
+            if expected_fvg_type and fvg_type != expected_fvg_type:
+                # El tipo de FVG no es el esperado según el barrido
+                self.logger.info(f"[{symbol}] ⏸️  Esperando: FVG {fvg_type} detectado, pero necesitamos FVG {expected_fvg_type} (barrido {sweep_type} → {direction})")
+                return None
+            
+            self.logger.info(f"[{symbol}] ✅ FVG {fvg_type} correcto para la estrategia (según barrido H4: {sweep_type})")
+            
+            self.logger.info(f"[{symbol}] ✅ Condiciones cumplidas - Listo para calcular entrada")
             
             # Obtener precio actual
             current_candle = get_candle(self.entry_timeframe, 'ahora', symbol)
@@ -219,8 +259,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             
             rr = reward / risk
             
+            self.logger.info(f"[{symbol}] 📈 Calculando RR: Risk={risk:.5f}, Reward={reward:.5f}, RR={rr:.2f} (mínimo requerido: {self.min_rr})")
+            
             if rr < self.min_rr:
-                self.logger.debug(f"RR insuficiente: {rr:.2f} < {self.min_rr}")
+                self.logger.info(f"[{symbol}] ⏸️  Esperando: RR insuficiente ({rr:.2f} < {self.min_rr}). Intentando optimizar SL...")
                 # Intentar ajustar SL si es posible
                 adjusted_sl = self._optimize_sl(entry_price, take_profit, direction, fvg_top, fvg_bottom)
                 if adjusted_sl:
@@ -229,10 +271,15 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                     if new_rr >= self.min_rr:
                         stop_loss = adjusted_sl
                         rr = new_rr
+                        self.logger.info(f"[{symbol}] ✅ SL optimizado: Nuevo RR={rr:.2f}")
                     else:
+                        self.logger.info(f"[{symbol}] ⏸️  Esperando: SL optimizado aún no alcanza RR mínimo ({new_rr:.2f} < {self.min_rr})")
                         return None
                 else:
+                    self.logger.info(f"[{symbol}] ⏸️  Esperando: No se pudo optimizar SL para alcanzar RR mínimo")
                     return None
+            else:
+                self.logger.info(f"[{symbol}] ✅ RR válido: {rr:.2f} >= {self.min_rr} - Etapa 3/4 COMPLETA")
             
             return {
                 'direction': direction,
@@ -305,14 +352,33 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             stop_loss = entry_signal['stop_loss']
             take_profit = entry_signal['take_profit']
             rr = entry_signal['rr']
+            fvg = entry_signal.get('fvg', {})
             
-            self.logger.info(
-                f"Ejecutando orden: {direction} | "
-                f"Entry: {entry_price:.5f} | "
-                f"SL: {stop_loss:.5f} | "
-                f"TP: {take_profit:.5f} | "
-                f"RR: {rr:.2f}"
-            )
+            # Log estructurado de la orden
+            self.logger.info(f"[{symbol}] {'='*70}")
+            self.logger.info(f"[{symbol}] 💹 EJECUTANDO ORDEN DE TRADING")
+            self.logger.info(f"[{symbol}] {'='*70}")
+            self.logger.info(f"[{symbol}] 📊 Dirección: {direction} ({'COMPRA' if direction == 'BULLISH' else 'VENTA'})")
+            self.logger.info(f"[{symbol}] 💰 Precio de Entrada: {entry_price:.5f}")
+            self.logger.info(f"[{symbol}] 🛑 Stop Loss: {stop_loss:.5f} (Risk: {entry_signal.get('risk', 0):.5f})")
+            self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f} (Reward: {entry_signal.get('reward', 0):.5f})")
+            self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1 (mínimo requerido: {self.min_rr}:1)")
+            self.logger.info(f"[{symbol}] 📦 Volumen: {self.volume}")
+            self.logger.info(f"[{symbol}] {'-'*70}")
+            self.logger.info(f"[{symbol}] 📋 Contexto de la Señal:")
+            self.logger.info(f"[{symbol}]    • Turtle Soup H4: {turtle_soup.get('sweep_type', 'N/A')} → {turtle_soup.get('direction', 'N/A')}")
+            self.logger.info(f"[{symbol}]    • Vela barrida: {turtle_soup.get('swept_candle', 'N/A')} ({turtle_soup.get('swept_extreme', 'N/A')})")
+            sweep_price = turtle_soup.get('sweep_price')
+            sweep_price_str = f"{sweep_price:.5f}" if sweep_price is not None else 'N/A'
+            self.logger.info(f"[{symbol}]    • Precio barrido: {sweep_price_str}")
+            target_price_log = turtle_soup.get('target_price')
+            target_price_str = f"{target_price_log:.5f}" if target_price_log is not None else 'N/A'
+            self.logger.info(f"[{symbol}]    • Objetivo: {target_price_str}")
+            if fvg:
+                self.logger.info(f"[{symbol}]    • FVG {self.entry_timeframe}: {fvg.get('fvg_type', 'N/A')} ({fvg.get('fvg_bottom', 0):.5f} - {fvg.get('fvg_top', 0):.5f})")
+                self.logger.info(f"[{symbol}]    • FVG Estado: {fvg.get('status', 'N/A')} | Entró: {fvg.get('entered_fvg', False)} | Salió: {fvg.get('exited_fvg', False)}")
+                self.logger.info(f"[{symbol}]    • Dirección de salida FVG: {fvg.get('exit_direction', 'N/A')}")
+            self.logger.info(f"[{symbol}] {'='*70}")
             
             # Ejecutar orden según dirección
             if direction == 'BULLISH':
@@ -335,7 +401,17 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 )
             
             if result['success']:
-                self.logger.info(f"✅ Orden ejecutada: Ticket {result['order_ticket']}")
+                self.logger.info(f"[{symbol}] {'='*70}")
+                self.logger.info(f"[{symbol}] ✅ ORDEN EJECUTADA EXITOSAMENTE")
+                self.logger.info(f"[{symbol}] {'='*70}")
+                self.logger.info(f"[{symbol}] 🎫 Ticket: {result['order_ticket']}")
+                self.logger.info(f"[{symbol}] 📊 Símbolo: {symbol}")
+                self.logger.info(f"[{symbol}] 💰 Precio: {entry_price:.5f}")
+                self.logger.info(f"[{symbol}] 📦 Volumen: {self.volume}")
+                self.logger.info(f"[{symbol}] 🛑 Stop Loss: {stop_loss:.5f}")
+                self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f}")
+                self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1")
+                self.logger.info(f"[{symbol}] {'='*70}")
                 return {
                     'action': f'{direction}_EXECUTED',
                     'ticket': result['order_ticket'],
@@ -343,10 +419,14 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                     'entry_signal': entry_signal
                 }
             else:
-                self.logger.error(f"❌ Error al ejecutar orden: {result['message']}")
+                self.logger.error(f"[{symbol}] {'='*70}")
+                self.logger.error(f"[{symbol}] ❌ ERROR AL EJECUTAR ORDEN")
+                self.logger.error(f"[{symbol}] {'='*70}")
+                self.logger.error(f"[{symbol}] Mensaje: {result.get('message', 'Error desconocido')}")
+                self.logger.error(f"[{symbol}] {'='*70}")
                 return None
                 
         except Exception as e:
-            self.logger.error(f"Error al ejecutar orden: {e}", exc_info=True)
+            self.logger.error(f"[{symbol}] ❌ Error al ejecutar orden: {e}", exc_info=True)
             return None
 
