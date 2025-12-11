@@ -313,18 +313,48 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 return None
             
             balance = account_info.balance
+            equity = account_info.equity if hasattr(account_info, 'equity') else balance
+            margin_free = account_info.margin_free if hasattr(account_info, 'margin_free') else balance
+            
             if balance <= 0:
-                self.logger.error(f"Balance inválido: {balance}")
+                self.logger.error(f"[{symbol}] ❌ Balance inválido: {balance}")
                 return None
             
             # Obtener información del símbolo
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
-                self.logger.error(f"No se pudo obtener información del símbolo {symbol}")
+                self.logger.error(f"[{symbol}] No se pudo obtener información del símbolo {symbol}")
                 return None
             
             # Calcular el riesgo en dinero
             risk_amount = balance * (self.risk_per_trade_percent / 100.0)
+            
+            # Validar que el balance sea suficiente para el riesgo
+            # El balance debe ser al menos 2x el riesgo para tener margen de seguridad
+            min_balance_required = risk_amount * 2
+            if balance < min_balance_required:
+                self.logger.error(
+                    f"[{symbol}] ❌ Balance insuficiente: Balance={balance:.2f} | "
+                    f"Riesgo calculado={risk_amount:.2f} | Mínimo requerido={min_balance_required:.2f}"
+                )
+                return None
+            
+            # Validar que haya margen libre suficiente
+            # Necesitamos al menos el riesgo + un margen adicional para el margen de la posición
+            # Estimación conservadora: necesitamos al menos 3x el riesgo en margen libre
+            min_margin_required = risk_amount * 3
+            if margin_free < min_margin_required:
+                self.logger.error(
+                    f"[{symbol}] ❌ Margen libre insuficiente: Margen libre={margin_free:.2f} | "
+                    f"Mínimo requerido={min_margin_required:.2f} | Equity={equity:.2f}"
+                )
+                return None
+            
+            self.logger.debug(
+                f"[{symbol}] ✅ Validación de balance: Balance={balance:.2f} | "
+                f"Equity={equity:.2f} | Margen libre={margin_free:.2f} | "
+                f"Riesgo={risk_amount:.2f} ({self.risk_per_trade_percent}%)"
+            )
             
             # Calcular el riesgo en precio (distancia del SL al entry)
             risk_in_price = abs(entry_price - stop_loss)
@@ -508,29 +538,162 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             self.logger.info(f"[{symbol}] 📊 FVG detectado: {fvg_type} | Estado: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')} | Exit Direction: {exit_direction}")
             self.logger.info(f"[{symbol}] 📊 FVG detalles: Bottom={fvg_bottom:.5f} | Top={fvg_top:.5f} | Precio actual={current_price_fvg:.5f}")
             
-            # Verificar que el precio haya entrado y salido del FVG PRIMERO
-            # Esto es lo más importante - si el precio entró y salió en la dirección correcta, proceder
-            if not fvg.get('entered_fvg'):
-                self.logger.info(f"[{symbol}] ⏸️  Esperando: El precio aún no ha entrado al FVG")
+            # ⚠️ VALIDACIÓN CRÍTICA: Verificar que la VELA EN FORMACIÓN haya entrado y salido del FVG
+            # REGLA OBLIGATORIA: La vela EN FORMACIÓN (actual, posición 0) DEBE haber entrado al FVG y salido en la dirección esperada
+            self.logger.info(f"[{symbol}] 🔍 Validando regla crítica: Vela EN FORMACIÓN debe entrar y salir del FVG...")
+            
+            # Obtener la vela EN FORMACIÓN (posición 0) para validar
+            # Mapeo de timeframe
+            timeframe_map = {
+                'M1': mt5.TIMEFRAME_M1,
+                'M5': mt5.TIMEFRAME_M5,
+                'M15': mt5.TIMEFRAME_M15,
+                'M30': mt5.TIMEFRAME_M30,
+                'H1': mt5.TIMEFRAME_H1,
+                'H4': mt5.TIMEFRAME_H4,
+                'D1': mt5.TIMEFRAME_D1,
+            }
+            tf = timeframe_map.get(self.entry_timeframe.upper(), mt5.TIMEFRAME_M5)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 1)  # Obtener solo la vela en formación (posición 0)
+            
+            if rates is None or len(rates) < 1:
+                self.logger.error(f"[{symbol}] ❌ No se pudo obtener la vela en formación")
                 return None
             
-            if not fvg.get('exited_fvg'):
-                self.logger.info(f"[{symbol}] ⏸️  Esperando: El precio entró al FVG pero aún no ha salido (Estado: {fvg.get('status')})")
+            # La vela en posición 0 es la vela EN FORMACIÓN (actual)
+            forming_candle_data = rates[0]
+            forming_candle = {
+                'open': float(forming_candle_data['open']),
+                'high': float(forming_candle_data['high']),
+                'low': float(forming_candle_data['low']),
+                'close': float(forming_candle_data['close']),
+                'time': datetime.fromtimestamp(forming_candle_data['time'])
+            }
+            
+            self.logger.info(f"[{symbol}] 📊 Analizando vela EN FORMACIÓN: {forming_candle['time'].strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Obtener información de la vela en formación
+            candle_high = forming_candle.get('high')
+            candle_low = forming_candle.get('low')
+            candle_close = forming_candle.get('close')
+            candle_open = forming_candle.get('open')
+            
+            if candle_high is None or candle_low is None or candle_close is None:
+                self.logger.error(f"[{symbol}] ❌ Vela en formación no tiene datos completos")
                 return None
             
-            # Verificar dirección de salida - DEBE coincidir con la dirección del Turtle Soup
-            # Normalizar exit_direction: ALCISTA -> BULLISH, BAJISTA -> BEARISH
-            normalized_exit_direction = None
-            if exit_direction == 'ALCISTA':
-                normalized_exit_direction = 'BULLISH'
-            elif exit_direction == 'BAJISTA':
-                normalized_exit_direction = 'BEARISH'
+            # VALIDACIÓN 1: La vela EN FORMACIÓN DEBE haber entrado al FVG
+            # La vela entró SOLO si su HIGH o LOW está DENTRO del rango del FVG
+            # NO basta con que se superponga, debe estar REALMENTE dentro
+            candle_entered_fvg = False
             
-            if normalized_exit_direction != direction:
-                self.logger.info(f"[{symbol}] ⏸️  Esperando: El precio salió del FVG en dirección {exit_direction} ({normalized_exit_direction}), pero necesitamos {direction} (según Turtle Soup H4)")
+            # Caso 1: HIGH está dentro del FVG (fvg_bottom <= high <= fvg_top)
+            if fvg_bottom <= candle_high <= fvg_top:
+                candle_entered_fvg = True
+                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: HIGH ({candle_high:.5f}) está dentro del FVG")
+            
+            # Caso 2: LOW está dentro del FVG (fvg_bottom <= low <= fvg_top)
+            elif fvg_bottom <= candle_low <= fvg_top:
+                candle_entered_fvg = True
+                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: LOW ({candle_low:.5f}) está dentro del FVG")
+            
+            # Caso 3: Vela cruzó completamente el FVG (low < bottom Y high > top)
+            elif candle_low < fvg_bottom and candle_high > fvg_top:
+                candle_entered_fvg = True
+                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: Cruzó completamente (LOW={candle_low:.5f} < Bottom={fvg_bottom:.5f} Y HIGH={candle_high:.5f} > Top={fvg_top:.5f})")
+            
+            # Caso 4: Vela contiene completamente el FVG (low <= bottom Y high >= top)
+            elif candle_low <= fvg_bottom and candle_high >= fvg_top:
+                candle_entered_fvg = True
+                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: Contiene completamente el FVG")
+            
+            if not candle_entered_fvg:
+                self.logger.info(
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN NO entró al FVG | "
+                    f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
+                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | "
+                    f"Análisis: HIGH dentro FVG? {fvg_bottom <= candle_high <= fvg_top} | "
+                    f"LOW dentro FVG? {fvg_bottom <= candle_low <= fvg_top}"
+                )
                 return None
             
-            self.logger.info(f"[{symbol}] ✅ Precio entró y salió del FVG en la dirección correcta ({direction})")
+            self.logger.info(f"[{symbol}] ✅ Vela EN FORMACIÓN entró al FVG: H={candle_high:.5f} L={candle_low:.5f}")
+            
+            # VALIDACIÓN 2: La vela EN FORMACIÓN DEBE haber salido del FVG en la dirección correcta
+            # IMPORTANTE: Primero debe haber entrado (ya validado arriba), ahora debe salir
+            # Para salir, el CLOSE de la vela debe estar FUERA del FVG en la dirección esperada
+            candle_exited_fvg = False
+            candle_exit_direction = None
+            
+            # Verificar que el CLOSE esté FUERA del rango del FVG
+            close_outside_fvg = (candle_close < fvg_bottom) or (candle_close > fvg_top)
+            
+            if not close_outside_fvg:
+                self.logger.info(
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN aún NO salió del FVG | "
+                    f"Close={candle_close:.5f} está DENTRO del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
+                    f"Debe estar FUERA del FVG en dirección {direction}"
+                )
+                return None
+            
+            # Ahora verificar la dirección de salida
+            if direction == 'BULLISH':
+                # Esperamos salida alcista: close debe estar ARRIBA del FVG
+                if candle_close > fvg_top:
+                    candle_exited_fvg = True
+                    candle_exit_direction = 'ALCISTA'
+                    self.logger.info(f"[{symbol}] 📍 Vela salió del FVG: CLOSE ({candle_close:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f})")
+                else:
+                    # Close está debajo del FVG pero esperábamos salida alcista
+                    self.logger.info(
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Vela salió del FVG pero en dirección incorrecta | "
+                        f"Close={candle_close:.5f} está DEBAJO del FVG (esperábamos ARRIBA para {direction})"
+                    )
+                    return None
+            elif direction == 'BEARISH':
+                # Esperamos salida bajista: close debe estar DEBAJO del FVG
+                if candle_close < fvg_bottom:
+                    candle_exited_fvg = True
+                    candle_exit_direction = 'BAJISTA'
+                    self.logger.info(f"[{symbol}] 📍 Vela salió del FVG: CLOSE ({candle_close:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f})")
+                else:
+                    # Close está arriba del FVG pero esperábamos salida bajista
+                    self.logger.info(
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Vela salió del FVG pero en dirección incorrecta | "
+                        f"Close={candle_close:.5f} está ARRIBA del FVG (esperábamos DEBAJO para {direction})"
+                    )
+                    return None
+            
+            if not candle_exited_fvg:
+                self.logger.info(
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN NO salió del FVG en dirección {direction} | "
+                    f"Close={candle_close:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
+                )
+                return None
+            
+            self.logger.info(
+                f"[{symbol}] ✅ Vela EN FORMACIÓN salió del FVG en dirección correcta: "
+                f"Close={candle_close:.5f} | Dirección={candle_exit_direction} | Esperada={direction}"
+            )
+            
+            # VALIDACIÓN 3: La dirección de salida de la vela EN FORMACIÓN DEBE coincidir con la dirección del Turtle Soup
+            normalized_candle_exit = None
+            if candle_exit_direction == 'ALCISTA':
+                normalized_candle_exit = 'BULLISH'
+            elif candle_exit_direction == 'BAJISTA':
+                normalized_candle_exit = 'BEARISH'
+            
+            if normalized_candle_exit != direction:
+                self.logger.info(
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN salió del FVG en dirección {candle_exit_direction} ({normalized_candle_exit}), "
+                    f"pero necesitamos {direction} (según Turtle Soup H4)"
+                )
+                return None
+            
+            self.logger.info(
+                f"[{symbol}] ✅ REGLA CUMPLIDA: La vela EN FORMACIÓN entró y salió del FVG en la dirección correcta ({direction}) | "
+                f"Vela: O={candle_open:.5f} H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f}"
+            )
             
             # Determinar qué tipo de FVG buscamos según el barrido de H4
             # LÓGICA CORREGIDA:
@@ -707,6 +870,92 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             Dict con resultado de la orden
         """
         try:
+            # ⚠️ VALIDACIÓN CRÍTICA FINAL: Verificar que la VELA EN FORMACIÓN haya entrado y salido del FVG ANTES de ejecutar
+            # Esta es la validación final más estricta antes de ejecutar la orden
+            self.logger.info(f"[{symbol}] 🔍 Validación final estricta: Verificando vela EN FORMACIÓN entró y salió del FVG...")
+            
+            # Detectar FVG actual (puede haber cambiado desde que se detectó la señal)
+            current_fvg = detect_fvg(symbol, self.entry_timeframe)
+            if not current_fvg:
+                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: No se detecta FVG en {self.entry_timeframe} - Cancelando orden")
+                return None
+            
+            # Verificar que el FVG es el esperado según el Turtle Soup
+            if not self._is_expected_fvg(current_fvg, turtle_soup):
+                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: El FVG detectado no es el esperado - Cancelando orden")
+                return None
+            
+            # Obtener la vela EN FORMACIÓN actual para validación final
+            timeframe_map = {
+                'M1': mt5.TIMEFRAME_M1,
+                'M5': mt5.TIMEFRAME_M5,
+                'M15': mt5.TIMEFRAME_M15,
+                'M30': mt5.TIMEFRAME_M30,
+                'H1': mt5.TIMEFRAME_H1,
+                'H4': mt5.TIMEFRAME_H4,
+                'D1': mt5.TIMEFRAME_D1,
+            }
+            tf = timeframe_map.get(self.entry_timeframe.upper(), mt5.TIMEFRAME_M5)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 1)
+            
+            if rates is None or len(rates) < 1:
+                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: No se pudo obtener la vela en formación - Cancelando orden")
+                return None
+            
+            forming_candle_data = rates[0]
+            candle_high = float(forming_candle_data['high'])
+            candle_low = float(forming_candle_data['low'])
+            candle_close = float(forming_candle_data['close'])
+            fvg_bottom = current_fvg.get('fvg_bottom')
+            fvg_top = current_fvg.get('fvg_top')
+            direction = entry_signal['direction']
+            
+            # VALIDACIÓN FINAL 1: La vela DEBE haber entrado al FVG (HIGH o LOW dentro del rango)
+            candle_entered = (
+                (fvg_bottom <= candle_high <= fvg_top) or  # HIGH dentro del FVG
+                (fvg_bottom <= candle_low <= fvg_top) or   # LOW dentro del FVG
+                (candle_low < fvg_bottom and candle_high > fvg_top) or  # Cruzó completamente
+                (candle_low <= fvg_bottom and candle_high >= fvg_top)  # Contiene completamente
+            )
+            
+            if not candle_entered:
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO entró al FVG | "
+                    f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
+                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} - Cancelando orden"
+                )
+                return None
+            
+            # VALIDACIÓN FINAL 2: La vela DEBE haber salido del FVG (CLOSE fuera del rango en dirección correcta)
+            close_outside = (candle_close < fvg_bottom) or (candle_close > fvg_top)
+            if not close_outside:
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO salió del FVG | "
+                    f"Close={candle_close:.5f} está DENTRO del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
+                )
+                return None
+            
+            # VALIDACIÓN FINAL 3: La dirección de salida DEBE ser correcta
+            if direction == 'BULLISH' and candle_close <= fvg_top:
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Vela salió del FVG pero en dirección incorrecta | "
+                    f"Close={candle_close:.5f} debe estar ARRIBA de {fvg_top:.5f} para {direction} - Cancelando orden"
+                )
+                return None
+            
+            if direction == 'BEARISH' and candle_close >= fvg_bottom:
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Vela salió del FVG pero en dirección incorrecta | "
+                    f"Close={candle_close:.5f} debe estar DEBAJO de {fvg_bottom:.5f} para {direction} - Cancelando orden"
+                )
+                return None
+            
+            self.logger.info(
+                f"[{symbol}] ✅ VALIDACIÓN FINAL EXITOSA: Vela EN FORMACIÓN entró y salió del FVG correctamente | "
+                f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
+                f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | Dirección: {direction}"
+            )
+            
             # Verificar límite de trades por día
             if not self._check_daily_trade_limit(symbol):
                 return None
@@ -716,7 +965,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             stop_loss = entry_signal['stop_loss']
             take_profit = entry_signal['take_profit']
             rr = entry_signal['rr']
-            fvg = entry_signal.get('fvg', {})
+            fvg = current_fvg  # Usar el FVG actual verificado
             
             # Calcular volumen basado en el riesgo porcentual
             volume = self._calculate_volume_by_risk(symbol, entry_price, stop_loss)

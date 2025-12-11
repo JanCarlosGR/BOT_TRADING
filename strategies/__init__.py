@@ -6,12 +6,10 @@ Nota: Las estrategias están en strategies.py en la raíz del proyecto.
 Esta carpeta está preparada para cuando crezcas a muchas estrategias.
 """
 
-# Por ahora, importar desde strategies.py en la raíz
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# No importar aquí para evitar import circular
+# Cada archivo debe importar directamente desde el módulo raíz:
+# from strategies import BaseStrategy
+# O usar: import sys; sys.path.insert(0, '..'); from strategies import BaseStrategy
 
-from strategies import BaseStrategy, StrategyManager
-
-__all__ = ['BaseStrategy', 'StrategyManager']
+__all__ = []
 

@@ -24,6 +24,7 @@ class StrategyManager:
         
         # Registrar estrategias disponibles
         from strategies.turtle_soup_fvg_strategy import TurtleSoupFVGStrategy
+        from strategies.default_strategy import DefaultStrategy
         
         self.strategies = {
             'default': DefaultStrategy(config),

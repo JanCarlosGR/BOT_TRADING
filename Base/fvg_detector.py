@@ -36,55 +36,32 @@ class FVGDetector:
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, 3)
         
         if rates is not None and len(rates) >= 3:
-            # Ordenar por tiempo para asegurar orden correcto (más antigua primero)
-            # rates[0] = más reciente, rates[2] = más antigua
+            # MT5 devuelve las velas de más reciente (índice 0) a más antigua (índice n)
+            # Pero para asegurar orden correcto, siempre ordenamos por tiempo
             # Necesitamos: [más antigua, del medio, más reciente]
             
-            # Vela más antigua (rates[2])
-            candle_data = rates[2]
-            time_antigua = datetime.fromtimestamp(candle_data['time'])
-            candles.append({
-                'time': time_antigua,
-                'open': float(candle_data['open']),
-                'high': float(candle_data['high']),
-                'low': float(candle_data['low']),
-                'close': float(candle_data['close']),
-                'volume': int(candle_data['tick_volume']),
-                'is_current': False
-            })
+            # Procesar todas las velas y ordenarlas por tiempo
+            for i, candle_data in enumerate(rates):
+                candle_time = datetime.fromtimestamp(candle_data['time'])
+                candles.append({
+                    'time': candle_time,
+                    'open': float(candle_data['open']),
+                    'high': float(candle_data['high']),
+                    'low': float(candle_data['low']),
+                    'close': float(candle_data['close']),
+                    'volume': int(candle_data['tick_volume']),
+                    'is_current': (i == 0)  # La primera (más reciente) es la actual
+                })
             
-            # Vela del medio (rates[1])
-            candle_data = rates[1]
-            time_medio = datetime.fromtimestamp(candle_data['time'])
-            candles.append({
-                'time': time_medio,
-                'open': float(candle_data['open']),
-                'high': float(candle_data['high']),
-                'low': float(candle_data['low']),
-                'close': float(candle_data['close']),
-                'volume': int(candle_data['tick_volume']),
-                'is_current': False
-            })
+            # Ordenar siempre por tiempo para asegurar orden correcto (más antigua primero)
+            candles = sorted(candles, key=lambda x: x['time'])
             
-            # Vela actual/más reciente (rates[0])
-            candle_data = rates[0]
-            time_actual = datetime.fromtimestamp(candle_data['time'])
-            candles.append({
-                'time': time_actual,
-                'open': float(candle_data['open']),
-                'high': float(candle_data['high']),
-                'low': float(candle_data['low']),
-                'close': float(candle_data['close']),
-                'volume': int(candle_data['tick_volume']),
-                'is_current': True
-            })
-            
-            # Verificar que el orden es correcto (más antigua primero)
-            if time_antigua > time_medio or time_medio > time_actual:
-                # Si el orden no es correcto, reordenar
-                self.logger.warning(f"Orden de velas incorrecto detectado. Reordenando...")
-                candles_sorted = sorted(candles, key=lambda x: x['time'])
-                candles = candles_sorted
+            # Marcar la más reciente como actual (puede haber cambiado después de ordenar)
+            if len(candles) > 0:
+                candles[-1]['is_current'] = True
+                # Asegurar que las anteriores no sean marcadas como actuales
+                for i in range(len(candles) - 1):
+                    candles[i]['is_current'] = False
         
         # Ya están ordenadas por tiempo (más antigua primero)
         return candles

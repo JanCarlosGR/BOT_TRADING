@@ -72,6 +72,11 @@ class TradingBot:
         """Conecta al terminal MT5"""
         mt5_config = self.config['mt5']
         
+        # Cerrar conexión existente si hay
+        if self.mt5_connected:
+            mt5.shutdown()
+            self.mt5_connected = False
+        
         # Inicializar MT5
         if not mt5.initialize(path=mt5_config.get('path')):
             self.logger.error(f"Error al inicializar MT5: {mt5.last_error()}")
@@ -106,14 +111,35 @@ class TradingBot:
         
         return True
     
+    def _check_and_reconnect_mt5(self) -> bool:
+        """
+        Verifica la conexión de MT5 y reconecta si es necesario
+        
+        Returns:
+            True si está conectado, False si no se pudo conectar
+        """
+        if not self.mt5_connected:
+            self.logger.warning("MT5 no está conectado, intentando reconectar...")
+            return self._connect_mt5()
+        
+        # Verificar que la conexión sigue activa
+        account_info = mt5.account_info()
+        if account_info is None:
+            self.logger.warning("Conexión MT5 perdida, intentando reconectar...")
+            self.mt5_connected = False
+            return self._connect_mt5()
+        
+        return True
+    
     def _is_trading_time(self) -> bool:
         """Verifica si estamos en horario operativo"""
         return self.trading_hours.is_trading_time()
     
     def _analyze_market(self):
         """Analiza el mercado para los símbolos configurados"""
-        if not self.mt5_connected:
-            self.logger.warning("MT5 no está conectado, saltando análisis")
+        # Verificar y reconectar MT5 si es necesario
+        if not self._check_and_reconnect_mt5():
+            self.logger.warning("No se pudo conectar a MT5, saltando análisis")
             return
         
         symbols = self.config['symbols']

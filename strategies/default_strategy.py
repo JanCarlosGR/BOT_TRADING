@@ -3,7 +3,7 @@ Estrategia por defecto (placeholder)
 Esta estrategia debe ser reemplazada por tus estrategias reales
 """
 
-from strategies import BaseStrategy
+from strategy_manager import BaseStrategy
 import numpy as np
 from typing import Optional, Dict
 

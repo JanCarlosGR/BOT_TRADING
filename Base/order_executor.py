@@ -28,15 +28,37 @@ class OrderExecutor:
         self._verify_mt5_connection()
     
     def _verify_mt5_connection(self) -> bool:
-        """Verifica que MT5 esté conectado"""
-        if not mt5.initialize():
-            self.logger.error(f"MT5 no está inicializado: {mt5.last_error()}")
-            return False
+        """
+        Verifica que MT5 esté conectado y activo
+        Intenta reconectar si la conexión se perdió
         
+        Returns:
+            True si está conectado, False si no se pudo conectar
+        """
+        # Verificar si MT5 está inicializado
+        if not mt5.initialize():
+            error = mt5.last_error()
+            self.logger.warning(f"MT5 no está inicializado: {error}, intentando reinicializar...")
+            # Intentar reinicializar
+            mt5.shutdown()
+            if not mt5.initialize():
+                self.logger.error(f"No se pudo reinicializar MT5: {mt5.last_error()}")
+                return False
+        
+        # Verificar que la conexión sigue activa
         account_info = mt5.account_info()
         if account_info is None:
-            self.logger.error("No se pudo obtener información de la cuenta")
-            return False
+            self.logger.warning("Conexión MT5 perdida - No se pudo obtener información de la cuenta")
+            # Intentar reinicializar
+            mt5.shutdown()
+            if not mt5.initialize():
+                self.logger.error(f"No se pudo reconectar MT5: {mt5.last_error()}")
+                return False
+            # Verificar nuevamente
+            account_info = mt5.account_info()
+            if account_info is None:
+                self.logger.error("No se pudo reconectar a MT5 después del intento")
+                return False
         
         self.logger.debug(f"MT5 conectado - Cuenta: {account_info.login}")
         return True
@@ -304,7 +326,7 @@ class OrderExecutor:
             }
         """
         try:
-            # Verificar conexión
+            # Verificar y reconectar MT5 si es necesario
             if not self._verify_mt5_connection():
                 return {
                     'success': False,
@@ -312,7 +334,7 @@ class OrderExecutor:
                     'price': None,
                     'volume': None,
                     'error': 'MT5_NO_CONNECTED',
-                    'message': 'MT5 no está conectado'
+                    'message': 'MT5 no está conectado - Intenta verificar que MT5 esté abierto y la cuenta esté activa'
                 }
             
             # Crear solicitud de orden

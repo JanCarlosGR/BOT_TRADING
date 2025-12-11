@@ -93,12 +93,14 @@ class CandleReader:
                     # En diciembre 2025, NY está en EST (UTC-5), si MT5 está en GMT+2, entonces:
                     # 1am EST = 6am UTC = 8am GMT+2, diferencia = 7 horas
                     self.mt5_timezone_offset = timedelta(hours=7)
-                    self.logger.info(f"Offset de zona horaria detectado: MT5 está {self.mt5_timezone_offset} adelante de {self.tz}")
+                    # Solo loguear la primera vez (DEBUG para no saturar logs)
+                    self.logger.debug(f"Offset de zona horaria detectado: MT5 está {self.mt5_timezone_offset} adelante de {self.tz}")
                     return self.mt5_timezone_offset
             
             # Fallback: usar offset conocido
             self.mt5_timezone_offset = timedelta(hours=7)
-            self.logger.info(f"Usando offset por defecto: MT5 está {self.mt5_timezone_offset} adelante de {self.tz}")
+            # Solo loguear la primera vez (DEBUG para no saturar logs)
+            self.logger.debug(f"Usando offset por defecto: MT5 está {self.mt5_timezone_offset} adelante de {self.tz}")
             return self.mt5_timezone_offset
             
         except Exception as e:
