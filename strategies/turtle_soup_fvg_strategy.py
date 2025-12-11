@@ -157,7 +157,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                         self.logger.info(f"[{symbol}] {'='*70}")
                         self.logger.info(f"[{symbol}] 📊 FVG {fvg.get('fvg_type')} detectado: {fvg.get('fvg_bottom', 0):.5f} - {fvg.get('fvg_top', 0):.5f}")
                         self.logger.info(f"[{symbol}] 📊 Estado FVG: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')}")
-                        self.logger.info(f"[{symbol}] 🔄 El bot ahora analizará cada SEGUNDO hasta que se cumplan las condiciones de entrada")
+                        self.logger.info(f"[{symbol}] 🔄 El bot ahora analizará cada SEGUNDO evaluando:")
+                        self.logger.info(f"[{symbol}]    • Si las 3 velas forman el FVG esperado")
+                        self.logger.info(f"[{symbol}]    • Si la vela EN FORMACIÓN entró al FVG (HIGH para BAJISTA, LOW para ALCISTA)")
+                        self.logger.info(f"[{symbol}]    • Si el precio actual salió del FVG en la dirección correcta")
                         self.logger.info(f"[{symbol}] {'='*70}")
                         self.monitoring_fvg = True
                         self.monitoring_fvg_data = {
@@ -173,9 +176,9 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                             self.logger.debug(f"[{symbol}] 🔄 Monitoreando FVG en tiempo real... Estado: {fvg.get('status')}")
                             self._last_fvg_update_log = time.time()
                 else:
-                    # Si estaba monitoreando pero el FVG desapareció, cancelar monitoreo
+                    # Si estaba monitoreando pero el FVG desapareció o no es el esperado, cancelar monitoreo
                     if self.monitoring_fvg:
-                        self.logger.info(f"[{symbol}] ⏸️  FVG esperado desapareció - Cancelando monitoreo intensivo")
+                        self.logger.info(f"[{symbol}] ⏸️  FVG esperado desapareció o cambió - Cancelando monitoreo intensivo")
                         self.monitoring_fvg = False
                         self.monitoring_fvg_data = None
                 
@@ -567,11 +570,16 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             direction = turtle_soup.get('direction')
             fvg_type = fvg.get('fvg_type')
             
+            # Verificar si el FVG es el esperado según el Turtle Soup
+            if not self._is_expected_fvg(fvg, turtle_soup):
+                self.logger.info(f"[{symbol}] ⏸️  FVG detectado ({fvg_type}) no es el esperado según Turtle Soup ({sweep_type} → {direction})")
+                return None
+            
             exit_direction = fvg.get('exit_direction')
             fvg_bottom = fvg.get('fvg_bottom')
             fvg_top = fvg.get('fvg_top')
             current_price_fvg = fvg.get('current_price')
-            self.logger.info(f"[{symbol}] 📊 FVG detectado: {fvg_type} | Estado: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')} | Exit Direction: {exit_direction}")
+            self.logger.info(f"[{symbol}] 📊 FVG ESPERADO detectado: {fvg_type} | Estado: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')} | Exit Direction: {exit_direction}")
             self.logger.info(f"[{symbol}] 📊 FVG detalles: Bottom={fvg_bottom:.5f} | Top={fvg_top:.5f} | Precio actual={current_price_fvg:.5f}")
             
             # ⚠️ VALIDACIÓN CRÍTICA: Verificar que la VELA EN FORMACIÓN (junto con las 2 anteriores) formen el FVG esperado
@@ -1156,7 +1164,17 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             stop_loss = entry_signal['stop_loss']
             take_profit = entry_signal['take_profit']
             rr = entry_signal['rr']
-            fvg = current_fvg  # Usar el FVG actual verificado
+            
+            # Crear diccionario FVG con la información calculada y validada
+            fvg = {
+                'fvg_type': calculated_fvg_type,
+                'fvg_bottom': fvg_bottom,
+                'fvg_top': fvg_top,
+                'status': 'VALIDADO',
+                'entered_fvg': True,  # Ya validado arriba
+                'exited_fvg': True,   # Ya validado arriba
+                'exit_direction': 'BAJISTA' if (calculated_fvg_type == 'BAJISTA' and direction == 'BEARISH') else 'ALCISTA' if (calculated_fvg_type == 'ALCISTA' and direction == 'BULLISH') else None
+            }
             
             # Calcular volumen basado en el riesgo porcentual
             volume = self._calculate_volume_by_risk(symbol, entry_price, stop_loss)
