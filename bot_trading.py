@@ -11,8 +11,8 @@ import MetaTrader5 as mt5
 from pytz import timezone
 import time as time_module
 
-from strategies import StrategyManager
-from trading_hours import TradingHoursManager
+from strategy_manager import StrategyManager
+from Base.trading_hours import TradingHoursManager
 
 
 class TradingBot:
@@ -190,13 +190,26 @@ class TradingBot:
                 
                 # Verificar si estamos en horario operativo
                 if self._is_trading_time():
-                    self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] Horario operativo activo - Analizando mercado...")
+                    self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Horario operativo activo - Analizando mercado...")
                     self._analyze_market()
+                    
+                    # Verificar si la estrategia necesita monitoreo intensivo
+                    strategy_name = self.config['strategy']['name']
+                    if self.strategy_manager.needs_intensive_monitoring(strategy_name):
+                        # Monitoreo intensivo: evaluar cada segundo
+                        sleep_interval = 1
+                        self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo (cada {sleep_interval}s)")
+                    else:
+                        # Modo normal: usar intervalo configurado
+                        sleep_interval = 60
                 else:
-                    self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] Fuera de horario operativo - Esperando...")
+                    next_trading = self.trading_hours.get_next_trading_time()
+                    time_until = self.trading_hours.get_time_until_trading()
+                    self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ⏸️  Fuera de horario operativo - Próximo horario: {next_trading.strftime('%H:%M')} ({time_until})")
+                    sleep_interval = 60
                 
-                # Esperar antes de la siguiente iteración (60 segundos)
-                time_module.sleep(60)
+                # Esperar antes de la siguiente iteración
+                time_module.sleep(sleep_interval)
                 
         except KeyboardInterrupt:
             self.logger.info("Bot detenido por el usuario")

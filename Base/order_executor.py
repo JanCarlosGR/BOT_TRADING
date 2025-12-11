@@ -72,6 +72,7 @@ class OrderExecutor:
             'volume_min': symbol_info.volume_min,
             'volume_max': symbol_info.volume_max,
             'volume_step': symbol_info.volume_step,
+            'trade_stops_level': symbol_info.trade_stops_level,  # Distancia mínima para SL/TP en puntos
         }
     
     def _normalize_volume(self, symbol: str, volume: float) -> Optional[float]:
@@ -121,6 +122,87 @@ class OrderExecutor:
         digits = symbol_info['digits']
         return round(price, digits)
     
+    def _validate_and_adjust_stops(self, symbol: str, order_type: OrderType, 
+                                   entry_price: float, stop_loss: Optional[float] = None,
+                                   take_profit: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Valida y ajusta los niveles de Stop Loss y Take Profit según el stop level del broker
+        
+        Args:
+            symbol: Símbolo
+            order_type: Tipo de orden (BUY o SELL)
+            entry_price: Precio de entrada
+            stop_loss: Stop Loss propuesto
+            take_profit: Take Profit propuesto
+            
+        Returns:
+            Tuple con (stop_loss_ajustado, take_profit_ajustado)
+        """
+        symbol_info = self._get_symbol_info(symbol)
+        if symbol_info is None:
+            return stop_loss, take_profit
+        
+        stop_level = symbol_info.get('trade_stops_level', 0)  # Puntos mínimos requeridos
+        point = symbol_info['point']
+        min_distance = stop_level * point  # Distancia mínima en precio
+        
+        adjusted_sl = stop_loss
+        adjusted_tp = take_profit
+        
+        if stop_loss:
+            if order_type == OrderType.BUY:
+                # Para compras: SL debe estar debajo del entry
+                if stop_loss >= entry_price:
+                    self.logger.warning(f"SL {stop_loss} debe estar debajo del entry {entry_price} para BUY")
+                    adjusted_sl = None
+                else:
+                    # Verificar distancia mínima
+                    distance = entry_price - stop_loss
+                    if distance < min_distance:
+                        # Ajustar SL para cumplir con la distancia mínima
+                        adjusted_sl = self._normalize_price(symbol, entry_price - min_distance)
+                        self.logger.info(f"SL ajustado de {stop_loss} a {adjusted_sl} para cumplir stop level ({stop_level} puntos)")
+            else:  # SELL
+                # Para ventas: SL debe estar arriba del entry
+                if stop_loss <= entry_price:
+                    self.logger.warning(f"SL {stop_loss} debe estar arriba del entry {entry_price} para SELL")
+                    adjusted_sl = None
+                else:
+                    # Verificar distancia mínima
+                    distance = stop_loss - entry_price
+                    if distance < min_distance:
+                        # Ajustar SL para cumplir con la distancia mínima
+                        adjusted_sl = self._normalize_price(symbol, entry_price + min_distance)
+                        self.logger.info(f"SL ajustado de {stop_loss} a {adjusted_sl} para cumplir stop level ({stop_level} puntos)")
+        
+        if take_profit:
+            if order_type == OrderType.BUY:
+                # Para compras: TP debe estar arriba del entry
+                if take_profit <= entry_price:
+                    self.logger.warning(f"TP {take_profit} debe estar arriba del entry {entry_price} para BUY")
+                    adjusted_tp = None
+                else:
+                    # Verificar distancia mínima
+                    distance = take_profit - entry_price
+                    if distance < min_distance:
+                        # Ajustar TP para cumplir con la distancia mínima
+                        adjusted_tp = self._normalize_price(symbol, entry_price + min_distance)
+                        self.logger.info(f"TP ajustado de {take_profit} a {adjusted_tp} para cumplir stop level ({stop_level} puntos)")
+            else:  # SELL
+                # Para ventas: TP debe estar debajo del entry
+                if take_profit >= entry_price:
+                    self.logger.warning(f"TP {take_profit} debe estar debajo del entry {entry_price} para SELL")
+                    adjusted_tp = None
+                else:
+                    # Verificar distancia mínima
+                    distance = entry_price - take_profit
+                    if distance < min_distance:
+                        # Ajustar TP para cumplir con la distancia mínima
+                        adjusted_tp = self._normalize_price(symbol, entry_price - min_distance)
+                        self.logger.info(f"TP ajustado de {take_profit} a {adjusted_tp} para cumplir stop level ({stop_level} puntos)")
+        
+        return adjusted_sl, adjusted_tp
+    
     def _create_order_request(self, symbol: str, order_type: OrderType, volume: float,
                              price: Optional[float] = None, stop_loss: Optional[float] = None,
                              take_profit: Optional[float] = None, comment: str = "") -> Dict:
@@ -150,12 +232,17 @@ class OrderExecutor:
             else:
                 price = symbol_info['bid']  # Precio de venta
         
-        # Normalizar precios
+        # Normalizar precio de entrada
         price = self._normalize_price(symbol, price)
-        if stop_loss:
-            stop_loss = self._normalize_price(symbol, stop_loss)
-        if take_profit:
-            take_profit = self._normalize_price(symbol, take_profit)
+        
+        # Validar y ajustar Stop Loss y Take Profit según stop level del broker
+        stop_loss, take_profit = self._validate_and_adjust_stops(
+            symbol=symbol,
+            order_type=order_type,
+            entry_price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit
+        )
         
         # Normalizar volumen
         volume = self._normalize_volume(symbol, volume)

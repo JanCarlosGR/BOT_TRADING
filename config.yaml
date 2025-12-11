@@ -11,8 +11,8 @@ mt5:
 # Activos a operar
 symbols:
   - "EURUSD"
-  - "GBPUSD"
   # Agregar más activos según necesites
+  # - "GBPUSD"
   # - "USDJPY"
   # - "AUDUSD"
 
@@ -20,7 +20,7 @@ symbols:
 trading_hours:
   enabled: true
   start_time: "09:00"  # Hora de inicio (formato HH:MM)
-  end_time: "13:00"    # Hora de fin (formato HH:MM)
+  end_time: "23:59"    # Hora de fin (formato HH:MM) - 12 de la noche (hasta antes de medianoche)
   timezone: "America/New_York"  # Zona horaria
 
 # Estrategia activa
@@ -30,15 +30,16 @@ strategy:
   
 # Configuración específica de estrategia
 strategy_config:
-  entry_timeframe: "M5"  # Temporalidad de entrada: "M1" o "M5" (o superior)
+  entry_timeframe: "M1"  # Temporalidad de entrada: "M1" o "M5" (o superior)
   min_rr: 2.0  # Risk/Reward mínimo (1:2)
 
 # Configuración de riesgo
 risk_management:
-  max_position_size: 0.1  # Tamaño máximo de posición (lots)
-  max_daily_trades: 10    # Máximo de operaciones por día
-  stop_loss_pips: 50      # Stop loss en pips
-  take_profit_pips: 100   # Take profit en pips
+  risk_per_trade_percent: 1.0  # Porcentaje de riesgo por trade (ej: 1.0 = 1% de la cuenta)
+  max_trades_per_day: 2        # Máximo de trades por día
+  max_position_size: 0.1       # Tamaño máximo de posición (lots) - límite de seguridad
+  stop_loss_pips: 50           # Stop loss en pips (legacy, no se usa si se calcula por riesgo)
+  take_profit_pips: 100        # Take profit en pips (legacy, no se usa si se calcula por riesgo)
 
 # Configuración general
 general:

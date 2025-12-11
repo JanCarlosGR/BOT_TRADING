@@ -7,7 +7,7 @@ import logging
 from typing import Optional, Dict
 import numpy as np
 import MetaTrader5 as mt5
-from datetime import datetime
+from datetime import datetime, date
 import time
 
 import sys
@@ -48,7 +48,16 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         strategy_config = config.get('strategy_config', {})
         self.entry_timeframe = strategy_config.get('entry_timeframe', 'M5')  # M1 o M5
         self.min_rr = strategy_config.get('min_rr', 2.0)  # Risk/Reward mínimo
-        self.volume = config.get('risk_management', {}).get('volume', 0.01)
+        
+        # Configuración de gestión de riesgo
+        risk_config = config.get('risk_management', {})
+        self.risk_per_trade_percent = risk_config.get('risk_per_trade_percent', 1.0)  # Porcentaje de riesgo por trade
+        self.max_trades_per_day = risk_config.get('max_trades_per_day', 2)  # Máximo de trades por día
+        self.max_position_size = risk_config.get('max_position_size', 0.1)  # Límite de seguridad
+        
+        # Contador de trades por día
+        self.trades_today = 0
+        self.last_trade_date = None
         
         # Frecuencia de evaluación según timeframe
         if self.entry_timeframe == 'M1':
@@ -61,7 +70,12 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         self.last_news_check = None
         self.last_evaluation = None
         
+        # Estado de monitoreo intensivo de FVG
+        self.monitoring_fvg = False  # Indica si estamos monitoreando un FVG en tiempo real
+        self.monitoring_fvg_data = None  # Datos del FVG que estamos monitoreando (turtle_soup, fvg_info)
+        
         self.logger.info(f"TurtleSoupFVGStrategy inicializada - Entry: {self.entry_timeframe}, RR: {self.min_rr}")
+        self.logger.info(f"Riesgo por trade: {self.risk_per_trade_percent}% | Máximo trades/día: {self.max_trades_per_day}")
     
     def analyze(self, symbol: str, rates: np.ndarray) -> Optional[Dict]:
         """
@@ -75,6 +89,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             Dict con señal de trading o None
         """
         try:
+            # Si estamos en modo monitoreo intensivo, evaluar condiciones del FVG
+            if self.monitoring_fvg and self.monitoring_fvg_data:
+                return self._monitor_fvg_intensive(symbol)
+            
             # 1. Verificar noticias de alto impacto (5 min antes/después)
             self.logger.info(f"[{symbol}] 📰 Etapa 1/4: Verificando noticias económicas...")
             if not self._check_news(symbol):
@@ -87,6 +105,11 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             
             if not turtle_soup or not turtle_soup.get('detected'):
                 self.turtle_soup_signal = None
+                # Si estaba monitoreando, cancelar monitoreo
+                if self.monitoring_fvg:
+                    self.logger.info(f"[{symbol}] ⏸️  Turtle Soup desapareció - Cancelando monitoreo intensivo")
+                    self.monitoring_fvg = False
+                    self.monitoring_fvg_data = None
                 self.logger.info(f"[{symbol}] ⏸️  Etapa 2/4: Esperando - No hay Turtle Soup detectado en H4")
                 return None
             
@@ -109,12 +132,324 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 self.logger.info(f"[{symbol}] 💹 Etapa 4/4: Ejecutando orden...")
                 return self._execute_order(symbol, turtle_soup, entry_signal)
             else:
-                self.logger.info(f"[{symbol}] ⏸️  Etapa 3/4: Esperando - No hay señal de entrada FVG válida aún")
+                # Verificar si hay un FVG esperado para activar monitoreo intensivo
+                fvg = detect_fvg(symbol, self.entry_timeframe)
+                if fvg and self._is_expected_fvg(fvg, turtle_soup):
+                    # Activar monitoreo intensivo solo si no está ya activo
+                    if not self.monitoring_fvg:
+                        self.logger.info(f"[{symbol}] 🔄 FVG esperado detectado - Activando monitoreo intensivo (cada segundo)")
+                        self.monitoring_fvg = True
+                        self.monitoring_fvg_data = {
+                            'turtle_soup': turtle_soup,
+                            'fvg': fvg
+                        }
+                    else:
+                        # Actualizar datos del FVG si ya está monitoreando
+                        self.monitoring_fvg_data['fvg'] = fvg
+                        self.monitoring_fvg_data['turtle_soup'] = turtle_soup
+                else:
+                    # Si estaba monitoreando pero el FVG desapareció, cancelar monitoreo
+                    if self.monitoring_fvg:
+                        self.logger.info(f"[{symbol}] ⏸️  FVG esperado desapareció - Cancelando monitoreo intensivo")
+                        self.monitoring_fvg = False
+                        self.monitoring_fvg_data = None
+                
+                # Solo log si no está en monitoreo intensivo (para evitar saturación)
+                if not self.monitoring_fvg:
+                    self.logger.info(f"[{symbol}] ⏸️  Etapa 3/4: Esperando - No hay señal de entrada FVG válida aún")
             
             return None
             
         except Exception as e:
             self.logger.error(f"Error en análisis: {e}", exc_info=True)
+            return None
+    
+    def needs_intensive_monitoring(self) -> bool:
+        """
+        Indica si la estrategia necesita monitoreo intensivo (cada segundo)
+        
+        Returns:
+            True si necesita monitoreo intensivo, False si usa intervalo normal
+        """
+        return self.monitoring_fvg
+    
+    def _is_expected_fvg(self, fvg: Dict, turtle_soup: Dict) -> bool:
+        """
+        Verifica si un FVG es el esperado según el Turtle Soup
+        
+        Args:
+            fvg: Información del FVG
+            turtle_soup: Información del Turtle Soup
+            
+        Returns:
+            True si el FVG es el esperado
+        """
+        try:
+            sweep_type = turtle_soup.get('sweep_type')
+            direction = turtle_soup.get('direction')
+            fvg_type = fvg.get('fvg_type')
+            
+            # Determinar qué tipo de FVG buscamos según el barrido de H4
+            expected_fvg_type = None
+            if sweep_type == 'BULLISH_SWEEP' and direction == 'BEARISH':
+                expected_fvg_type = 'BAJISTA'
+            elif sweep_type == 'BEARISH_SWEEP' and direction == 'BULLISH':
+                expected_fvg_type = 'ALCISTA'
+            
+            return expected_fvg_type is not None and fvg_type == expected_fvg_type
+        except:
+            return False
+    
+    def _monitor_fvg_intensive(self, symbol: str) -> Optional[Dict]:
+        """
+        Monitorea el FVG en tiempo real (cada segundo) hasta que se cumplan condiciones o expire
+        
+        Args:
+            symbol: Símbolo a monitorear
+            
+        Returns:
+            Dict con señal de trading si se cumplen condiciones, None si sigue monitoreando
+        """
+        try:
+            if not self.monitoring_fvg_data:
+                self.monitoring_fvg = False
+                return None
+            
+            turtle_soup = self.monitoring_fvg_data.get('turtle_soup')
+            if not turtle_soup:
+                self.monitoring_fvg = False
+                self.monitoring_fvg_data = None
+                return None
+            
+            # Verificar que el Turtle Soup aún existe
+            current_turtle_soup = detect_turtle_soup_h4(symbol)
+            if not current_turtle_soup or not current_turtle_soup.get('detected'):
+                self.logger.info(f"[{symbol}] ⏸️  Turtle Soup desapareció durante monitoreo - Cancelando")
+                self.monitoring_fvg = False
+                self.monitoring_fvg_data = None
+                return None
+            
+            # Verificar que el FVG aún existe y es el esperado
+            fvg = detect_fvg(symbol, self.entry_timeframe)
+            if not fvg or not self._is_expected_fvg(fvg, turtle_soup):
+                self.logger.info(f"[{symbol}] ⏸️  FVG esperado desapareció durante monitoreo - Cancelando")
+                self.monitoring_fvg = False
+                self.monitoring_fvg_data = None
+                return None
+            
+            # Actualizar datos del FVG
+            self.monitoring_fvg_data['fvg'] = fvg
+            
+            # Evaluar condiciones de entrada
+            entry_signal = self._find_fvg_entry(symbol, turtle_soup)
+            
+            if entry_signal:
+                # Condiciones cumplidas - ejecutar orden y cancelar monitoreo
+                self.logger.info(f"[{symbol}] ✅ Condiciones cumplidas durante monitoreo intensivo - Ejecutando orden")
+                self.monitoring_fvg = False
+                self.monitoring_fvg_data = None
+                return self._execute_order(symbol, turtle_soup, entry_signal)
+            
+            # Condiciones aún no cumplidas - seguir monitoreando
+            # Log solo cada 10 segundos para no saturar
+            import time
+            current_time = time.time()
+            if not hasattr(self, '_last_monitor_log') or (current_time - self._last_monitor_log) >= 10:
+                self.logger.debug(f"[{symbol}] 🔄 Monitoreando FVG en tiempo real... (Estado: {fvg.get('status')}, Entró: {fvg.get('entered_fvg')}, Salió: {fvg.get('exited_fvg')})")
+                self._last_monitor_log = current_time
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error en monitoreo intensivo: {e}", exc_info=True)
+            self.monitoring_fvg = False
+            self.monitoring_fvg_data = None
+            return None
+    
+    def _reset_daily_trades_counter(self):
+        """Resetea el contador de trades si es un nuevo día"""
+        today = date.today()
+        if self.last_trade_date != today:
+            if self.last_trade_date is not None:
+                self.logger.info(f"🔄 Nuevo día - Reseteando contador de trades (anterior: {self.trades_today})")
+            self.trades_today = 0
+            self.last_trade_date = today
+    
+    def _check_daily_trade_limit(self, symbol: str) -> bool:
+        """
+        Verifica si se puede ejecutar un trade según el límite diario
+        
+        Args:
+            symbol: Símbolo a verificar
+            
+        Returns:
+            True si se puede ejecutar, False si se alcanzó el límite
+        """
+        self._reset_daily_trades_counter()
+        
+        if self.trades_today >= self.max_trades_per_day:
+            self.logger.info(f"[{symbol}] ⏸️  Límite de trades diarios alcanzado: {self.trades_today}/{self.max_trades_per_day}")
+            return False
+        
+        return True
+    
+    def _calculate_volume_by_risk(self, symbol: str, entry_price: float, stop_loss: float) -> Optional[float]:
+        """
+        Calcula el volumen basado en el riesgo porcentual de la cuenta
+        
+        Args:
+            symbol: Símbolo a operar
+            entry_price: Precio de entrada
+            stop_loss: Precio de stop loss
+            
+        Returns:
+            Volumen calculado en lotes o None si hay error
+        """
+        try:
+            # Obtener información de la cuenta
+            account_info = mt5.account_info()
+            if account_info is None:
+                self.logger.error("No se pudo obtener información de la cuenta")
+                return None
+            
+            balance = account_info.balance
+            if balance <= 0:
+                self.logger.error(f"Balance inválido: {balance}")
+                return None
+            
+            # Obtener información del símbolo
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                self.logger.error(f"No se pudo obtener información del símbolo {symbol}")
+                return None
+            
+            # Calcular el riesgo en dinero
+            risk_amount = balance * (self.risk_per_trade_percent / 100.0)
+            
+            # Calcular el riesgo en precio (distancia del SL al entry)
+            risk_in_price = abs(entry_price - stop_loss)
+            
+            if risk_in_price == 0:
+                self.logger.error("El riesgo en precio es 0, no se puede calcular volumen")
+                return None
+            
+            # Obtener información del símbolo para calcular el valor del pip
+            tick_size = symbol_info.trade_tick_size  # Tamaño del tick (ej: 0.00001 para EURUSD)
+            tick_value = symbol_info.trade_tick_value  # Valor del tick en la moneda de la cuenta
+            
+            # Calcular el valor del riesgo por lote
+            # Fórmula: Volumen = Riesgo_en_dinero / (Riesgo_en_precio * Valor_del_tick_por_lote)
+            # Donde: Valor_del_tick_por_lote = tick_value / tick_size (para 1 lote estándar)
+            
+            if tick_size > 0 and tick_value > 0:
+                # Calcular cuántos ticks hay en el riesgo en precio
+                ticks_in_risk = risk_in_price / tick_size
+                
+                # El tick_value en MT5 es el valor de 1 tick para 1 lote estándar
+                # Valor del riesgo por lote = ticks_in_risk * tick_value
+                risk_value_per_lot = ticks_in_risk * tick_value
+                
+                self.logger.debug(f"[{symbol}] Cálculo detallado: ticks_in_risk={ticks_in_risk:.2f}, tick_value={tick_value}, risk_value_per_lot={risk_value_per_lot:.2f}")
+                
+                if risk_value_per_lot > 0:
+                    # Volumen = riesgo_en_dinero / riesgo_por_lote
+                    volume = risk_amount / risk_value_per_lot
+                    self.logger.debug(f"[{symbol}] Volumen calculado antes de normalizar: {volume:.4f} lotes")
+                else:
+                    self.logger.error("No se pudo calcular el valor del riesgo por lote")
+                    return None
+            else:
+                # Fallback: usar fórmula simplificada para forex estándar
+                # Asumir que 1 pip = 0.0001 y valor del pip = $10 por lote (para cuentas en USD)
+                # Esto es una aproximación y puede no ser exacta para todos los pares
+                pips_in_risk = risk_in_price / 0.0001
+                # Obtener la moneda de la cuenta para ajustar el valor del pip
+                account_info = mt5.account_info()
+                account_currency = account_info.currency if account_info else "USD"
+                
+                # Valor aproximado del pip por lote (esto varía según el par y la moneda de la cuenta)
+                # Para la mayoría de pares mayores con cuenta en USD: ~$10 por pip por lote
+                value_per_pip_per_lot = 10.0
+                risk_value_per_lot = pips_in_risk * value_per_pip_per_lot
+                
+                if risk_value_per_lot > 0:
+                    volume = risk_amount / risk_value_per_lot
+                    self.logger.warning(f"[{symbol}] Usando cálculo aproximado de volumen (fallback)")
+                else:
+                    self.logger.error("No se pudo calcular el volumen con método fallback")
+                    return None
+            
+            # Normalizar volumen según los límites del símbolo
+            volume_step = symbol_info.volume_step
+            volume_min = symbol_info.volume_min
+            volume_max = symbol_info.volume_max
+            
+            # Redondear al step más cercano (hacia arriba para asegurar que no sea menor)
+            volume_before_limit = volume
+            if volume_step > 0:
+                volume = round(volume / volume_step) * volume_step
+                # Si después de redondear es menor al mínimo, usar el mínimo
+                if volume < volume_min:
+                    volume = volume_min
+                    # Advertencia si el volumen calculado era mucho menor al mínimo
+                    if volume_before_limit < volume_min * 0.5:
+                        self.logger.warning(
+                            f"[{symbol}] ⚠️  Volumen calculado ({volume_before_limit:.4f}) es menor al mínimo ({volume_min}). "
+                            f"Usando mínimo, pero el riesgo real será menor al {self.risk_per_trade_percent}% configurado"
+                        )
+            else:
+                # Si no hay step definido, usar el mínimo si es necesario
+                if volume < volume_min:
+                    if volume < volume_min * 0.5:
+                        self.logger.warning(
+                            f"[{symbol}] ⚠️  Volumen calculado ({volume:.4f}) es menor al mínimo ({volume_min}). "
+                            f"Usando mínimo, pero el riesgo real será menor al {self.risk_per_trade_percent}% configurado"
+                        )
+                    volume = volume_min
+            
+            # Aplicar límite máximo del símbolo
+            if volume > volume_max:
+                volume = volume_max
+                self.logger.warning(f"[{symbol}] ⚠️  Volumen calculado excede el máximo del símbolo ({volume_max}), usando máximo")
+            
+            # Aplicar límite de seguridad de la configuración
+            if volume > self.max_position_size:
+                volume = self.max_position_size
+                self.logger.warning(f"[{symbol}] ⚠️  Volumen calculado excede el límite máximo de configuración ({self.max_position_size}), usando límite")
+            
+            # Verificar que el volumen final sea válido
+            if volume < volume_min:
+                self.logger.error(f"[{symbol}] ❌ Volumen calculado ({volume:.4f}) es menor al mínimo permitido ({volume_min})")
+                return None
+            
+            # Calcular el riesgo real que se está tomando con el volumen calculado
+            if tick_size > 0 and tick_value > 0:
+                ticks_in_risk = risk_in_price / tick_size
+                risk_value_actual = ticks_in_risk * tick_value * volume
+                risk_percent_actual = (risk_value_actual / balance) * 100
+            else:
+                pips_in_risk = risk_in_price / 0.0001
+                risk_value_actual = pips_in_risk * 10.0 * volume
+                risk_percent_actual = (risk_value_actual / balance) * 100
+            
+            self.logger.info(
+                f"[{symbol}] 💰 Cálculo de volumen por riesgo: "
+                f"Balance={balance:.2f} | Riesgo objetivo={self.risk_per_trade_percent}%={risk_amount:.2f} | "
+                f"Risk en precio={risk_in_price:.5f} | Volumen={volume:.2f} lotes | "
+                f"Riesgo real={risk_percent_actual:.2f}%={risk_value_actual:.2f}"
+            )
+            
+            # Advertencia si el riesgo real es muy diferente al objetivo
+            if abs(risk_percent_actual - self.risk_per_trade_percent) > 0.1:
+                self.logger.warning(
+                    f"[{symbol}] ⚠️  Diferencia entre riesgo objetivo ({self.risk_per_trade_percent}%) y real ({risk_percent_actual:.2f}%) "
+                    f"puede deberse a límites de volumen mínimo/máximo"
+                )
+            
+            return volume
+            
+        except Exception as e:
+            self.logger.error(f"Error al calcular volumen por riesgo: {e}", exc_info=True)
             return None
     
     def _check_news(self, symbol: str) -> bool:
@@ -238,17 +573,26 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             if fvg_top is None or fvg_bottom is None or target_price is None:
                 return None
             
-            # Calcular Stop Loss (debe cubrir todo el FVG)
+            # Calcular Stop Loss (debe cubrir todo el FVG + margen adicional para retrocesos)
+            fvg_size = fvg_top - fvg_bottom
+            # Usar 50% del tamaño del FVG como margen adicional para proteger contra retrocesos
+            # Esto asegura que si el precio retrocede y completa el FVG, el SL no se active
+            safety_margin = fvg_size * 0.5  # 50% adicional más allá del FVG
+            
             if direction == 'BULLISH':
-                # Compra: SL debajo del FVG
-                stop_loss = fvg_bottom - (fvg_top - fvg_bottom) * 0.1  # 10% adicional de seguridad
+                # Compra: SL debajo del FVG con margen adicional
+                # SL = Bottom del FVG - tamaño del FVG - margen adicional
+                stop_loss = fvg_bottom - fvg_size - safety_margin
                 entry_price = current_price
                 take_profit = target_price
+                self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Bottom: {fvg_bottom:.5f} - FVG Size: {fvg_size:.5f} - Safety Margin: {safety_margin:.5f})")
             else:
-                # Venta: SL arriba del FVG
-                stop_loss = fvg_top + (fvg_top - fvg_bottom) * 0.1  # 10% adicional de seguridad
+                # Venta: SL arriba del FVG con margen adicional
+                # SL = Top del FVG + tamaño del FVG + margen adicional
+                stop_loss = fvg_top + fvg_size + safety_margin
                 entry_price = current_price
                 take_profit = target_price
+                self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Top: {fvg_top:.5f} + FVG Size: {fvg_size:.5f} + Safety Margin: {safety_margin:.5f})")
             
             # Verificar Risk/Reward mínimo
             risk = abs(entry_price - stop_loss)
@@ -299,7 +643,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
     def _optimize_sl(self, entry_price: float, take_profit: float, direction: str, 
                     fvg_top: float, fvg_bottom: float) -> Optional[float]:
         """
-        Intenta optimizar el SL para lograr RR mínimo más rápido
+        Intenta optimizar el SL para lograr RR mínimo respetando el margen de seguridad del FVG
         
         Args:
             entry_price: Precio de entrada
@@ -314,19 +658,35 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         try:
             reward = abs(take_profit - entry_price)
             required_risk = reward / self.min_rr
+            fvg_size = fvg_top - fvg_bottom
+            safety_margin = fvg_size * 0.5  # 50% adicional más allá del FVG (igual que en el cálculo principal)
             
             if direction == 'BULLISH':
                 # Compra: SL debe estar debajo del entry
                 optimal_sl = entry_price - required_risk
-                # Verificar que no esté muy cerca del FVG bottom
-                if optimal_sl >= fvg_bottom * 0.99:  # 1% de margen
+                # Calcular el SL mínimo requerido (FVG bottom - tamaño FVG - margen)
+                min_sl_required = fvg_bottom - fvg_size - safety_margin
+                # El SL optimizado debe estar al menos al nivel mínimo requerido
+                if optimal_sl <= min_sl_required:
                     return optimal_sl
+                else:
+                    # Si el SL optimizado está muy cerca del FVG, usar el mínimo requerido
+                    # pero verificar que aún cumpla con el RR mínimo
+                    if min_sl_required < entry_price:
+                        return min_sl_required
             else:
                 # Venta: SL debe estar arriba del entry
                 optimal_sl = entry_price + required_risk
-                # Verificar que no esté muy cerca del FVG top
-                if optimal_sl <= fvg_top * 1.01:  # 1% de margen
+                # Calcular el SL mínimo requerido (FVG top + tamaño FVG + margen)
+                min_sl_required = fvg_top + fvg_size + safety_margin
+                # El SL optimizado debe estar al menos al nivel mínimo requerido
+                if optimal_sl >= min_sl_required:
                     return optimal_sl
+                else:
+                    # Si el SL optimizado está muy cerca del FVG, usar el mínimo requerido
+                    # pero verificar que aún cumpla con el RR mínimo
+                    if min_sl_required > entry_price:
+                        return min_sl_required
             
             return None
             
@@ -347,12 +707,22 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             Dict con resultado de la orden
         """
         try:
+            # Verificar límite de trades por día
+            if not self._check_daily_trade_limit(symbol):
+                return None
+            
             direction = entry_signal['direction']
             entry_price = entry_signal['entry_price']
             stop_loss = entry_signal['stop_loss']
             take_profit = entry_signal['take_profit']
             rr = entry_signal['rr']
             fvg = entry_signal.get('fvg', {})
+            
+            # Calcular volumen basado en el riesgo porcentual
+            volume = self._calculate_volume_by_risk(symbol, entry_price, stop_loss)
+            if volume is None or volume <= 0:
+                self.logger.error(f"[{symbol}] ❌ No se pudo calcular el volumen por riesgo")
+                return None
             
             # Log estructurado de la orden
             self.logger.info(f"[{symbol}] {'='*70}")
@@ -363,7 +733,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             self.logger.info(f"[{symbol}] 🛑 Stop Loss: {stop_loss:.5f} (Risk: {entry_signal.get('risk', 0):.5f})")
             self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f} (Reward: {entry_signal.get('reward', 0):.5f})")
             self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1 (mínimo requerido: {self.min_rr}:1)")
-            self.logger.info(f"[{symbol}] 📦 Volumen: {self.volume}")
+            self.logger.info(f"[{symbol}] 📦 Volumen: {volume:.2f} lotes (calculado por {self.risk_per_trade_percent}% de riesgo)")
             self.logger.info(f"[{symbol}] {'-'*70}")
             self.logger.info(f"[{symbol}] 📋 Contexto de la Señal:")
             self.logger.info(f"[{symbol}]    • Turtle Soup H4: {turtle_soup.get('sweep_type', 'N/A')} → {turtle_soup.get('direction', 'N/A')}")
@@ -384,7 +754,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             if direction == 'BULLISH':
                 result = self.executor.buy(
                     symbol=symbol,
-                    volume=self.volume,
+                    volume=volume,
                     price=entry_price,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
@@ -393,7 +763,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             else:
                 result = self.executor.sell(
                     symbol=symbol,
-                    volume=self.volume,
+                    volume=volume,
                     price=entry_price,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
@@ -401,16 +771,20 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 )
             
             if result['success']:
+                # Incrementar contador de trades del día
+                self.trades_today += 1
+                
                 self.logger.info(f"[{symbol}] {'='*70}")
                 self.logger.info(f"[{symbol}] ✅ ORDEN EJECUTADA EXITOSAMENTE")
                 self.logger.info(f"[{symbol}] {'='*70}")
                 self.logger.info(f"[{symbol}] 🎫 Ticket: {result['order_ticket']}")
                 self.logger.info(f"[{symbol}] 📊 Símbolo: {symbol}")
                 self.logger.info(f"[{symbol}] 💰 Precio: {entry_price:.5f}")
-                self.logger.info(f"[{symbol}] 📦 Volumen: {self.volume}")
+                self.logger.info(f"[{symbol}] 📦 Volumen: {volume:.2f} lotes")
                 self.logger.info(f"[{symbol}] 🛑 Stop Loss: {stop_loss:.5f}")
                 self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f}")
                 self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1")
+                self.logger.info(f"[{symbol}] 📊 Trades hoy: {self.trades_today}/{self.max_trades_per_day}")
                 self.logger.info(f"[{symbol}] {'='*70}")
                 return {
                     'action': f'{direction}_EXECUTED',
