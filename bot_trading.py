@@ -145,6 +145,19 @@ class TradingBot:
         symbols = self.config['symbols']
         strategy_name = self.config['strategy']['name']
         
+        # ⚠️ VERIFICACIÓN TEMPRANA: Si la estrategia alcanzó el límite de trades, detener análisis
+        strategy = self.strategy_manager.strategies.get(strategy_name)
+        if strategy and hasattr(strategy, 'has_reached_daily_limit'):
+            if strategy.has_reached_daily_limit():
+                # Solo loguear una vez cada minuto para no saturar
+                if not hasattr(self, '_last_limit_log') or (time_module.time() - self._last_limit_log) >= 60:
+                    self.logger.info(
+                        f"⏸️  Límite de trades diarios alcanzado para estrategia '{strategy_name}' | "
+                        f"Análisis detenido hasta próxima sesión operativa"
+                    )
+                    self._last_limit_log = time_module.time()
+                return
+        
         self.logger.info(f"Analizando mercado para {len(symbols)} símbolo(s) con estrategia: {strategy_name}")
         
         for symbol in symbols:

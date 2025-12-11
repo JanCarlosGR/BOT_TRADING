@@ -89,6 +89,18 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             Dict con señal de trading o None
         """
         try:
+            # ⚠️ VERIFICACIÓN TEMPRANA: Si ya se alcanzó el límite de trades, detener análisis
+            self._reset_daily_trades_counter()
+            if self.trades_today >= self.max_trades_per_day:
+                # Solo loguear una vez cada minuto para no saturar
+                if not hasattr(self, '_last_limit_log') or (time.time() - self._last_limit_log) >= 60:
+                    self.logger.info(
+                        f"[{symbol}] ⏸️  Límite de trades diarios alcanzado: {self.trades_today}/{self.max_trades_per_day} | "
+                        f"Análisis detenido hasta próxima sesión operativa"
+                    )
+                    self._last_limit_log = time.time()
+                return None
+            
             # Si estamos en modo monitoreo intensivo, evaluar condiciones del FVG
             if self.monitoring_fvg and self.monitoring_fvg_data:
                 return self._monitor_fvg_intensive(symbol)
@@ -172,6 +184,16 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             True si necesita monitoreo intensivo, False si usa intervalo normal
         """
         return self.monitoring_fvg
+    
+    def has_reached_daily_limit(self) -> bool:
+        """
+        Verifica si se ha alcanzado el límite de trades diarios
+        
+        Returns:
+            True si se alcanzó el límite, False si aún se pueden ejecutar trades
+        """
+        self._reset_daily_trades_counter()
+        return self.trades_today >= self.max_trades_per_day
     
     def _is_expected_fvg(self, fvg: Dict, turtle_soup: Dict) -> bool:
         """
