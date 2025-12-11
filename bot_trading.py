@@ -229,18 +229,28 @@ class TradingBot:
                 
                 # Verificar si estamos en horario operativo
                 if self._is_trading_time():
-                    self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Horario operativo activo - Analizando mercado...")
-                    self._analyze_market()
-                    
-                    # Verificar si la estrategia necesita monitoreo intensivo
+                    # Verificar ANTES de analizar si la estrategia necesita monitoreo intensivo
                     strategy_name = self.config['strategy']['name']
-                    if self.strategy_manager.needs_intensive_monitoring(strategy_name):
-                        # Monitoreo intensivo: evaluar cada segundo
+                    needs_intensive = self.strategy_manager.needs_intensive_monitoring(strategy_name)
+                    
+                    if needs_intensive:
+                        # Modo monitoreo intensivo: analizar cada segundo
+                        self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo - Analizando cada segundo...")
+                        self._analyze_market()
                         sleep_interval = 1
-                        self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo (cada {sleep_interval}s)")
                     else:
-                        # Modo normal: usar intervalo configurado
-                        sleep_interval = 60
+                        # Modo normal: analizar y esperar intervalo normal
+                        self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Horario operativo activo - Analizando mercado...")
+                        self._analyze_market()
+                        
+                        # Verificar DESPUÉS de analizar si se activó monitoreo intensivo
+                        if self.strategy_manager.needs_intensive_monitoring(strategy_name):
+                            # Si se activó durante el análisis, usar intervalo corto
+                            sleep_interval = 1
+                            self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Monitoreo intensivo activado - Cambiando a intervalo de 1 segundo")
+                        else:
+                            # Modo normal: usar intervalo configurado
+                            sleep_interval = 60
                 else:
                     next_trading = self.trading_hours.get_next_trading_time()
                     time_until = self.trading_hours.get_time_until_trading()

@@ -149,7 +149,13 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 if fvg and self._is_expected_fvg(fvg, turtle_soup):
                     # Activar monitoreo intensivo solo si no está ya activo
                     if not self.monitoring_fvg:
-                        self.logger.info(f"[{symbol}] 🔄 FVG esperado detectado - Activando monitoreo intensivo (cada segundo)")
+                        self.logger.info(f"[{symbol}] {'='*70}")
+                        self.logger.info(f"[{symbol}] 🔄 FVG ESPERADO DETECTADO - ACTIVANDO MONITOREO INTENSIVO")
+                        self.logger.info(f"[{symbol}] {'='*70}")
+                        self.logger.info(f"[{symbol}] 📊 FVG {fvg.get('fvg_type')} detectado: {fvg.get('fvg_bottom', 0):.5f} - {fvg.get('fvg_top', 0):.5f}")
+                        self.logger.info(f"[{symbol}] 📊 Estado FVG: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')}")
+                        self.logger.info(f"[{symbol}] 🔄 El bot ahora analizará cada SEGUNDO hasta que se cumplan las condiciones de entrada")
+                        self.logger.info(f"[{symbol}] {'='*70}")
                         self.monitoring_fvg = True
                         self.monitoring_fvg_data = {
                             'turtle_soup': turtle_soup,
@@ -159,6 +165,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                         # Actualizar datos del FVG si ya está monitoreando
                         self.monitoring_fvg_data['fvg'] = fvg
                         self.monitoring_fvg_data['turtle_soup'] = turtle_soup
+                        # Log cada 10 segundos para no saturar
+                        if not hasattr(self, '_last_fvg_update_log') or (time.time() - self._last_fvg_update_log) >= 10:
+                            self.logger.debug(f"[{symbol}] 🔄 Monitoreando FVG en tiempo real... Estado: {fvg.get('status')}")
+                            self._last_fvg_update_log = time.time()
                 else:
                     # Si estaba monitoreando pero el FVG desapareció, cancelar monitoreo
                     if self.monitoring_fvg:
