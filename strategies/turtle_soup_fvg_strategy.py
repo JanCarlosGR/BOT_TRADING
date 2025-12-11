@@ -74,6 +74,9 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         self.monitoring_fvg = False  # Indica si estamos monitoreando un FVG en tiempo real
         self.monitoring_fvg_data = None  # Datos del FVG que estamos monitoreando (turtle_soup, fvg_info)
         
+        # Control de trades ejecutados para evitar duplicados
+        self.executed_trades_today = []  # Lista de señales ya ejecutadas hoy (por Turtle Soup)
+        
         self.logger.info(f"TurtleSoupFVGStrategy inicializada - Entry: {self.entry_timeframe}, RR: {self.min_rr}")
         self.logger.info(f"Riesgo por trade: {self.risk_per_trade_percent}% | Máximo trades/día: {self.max_trades_per_day}")
     
@@ -306,6 +309,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 self.logger.info(f"🔄 Nuevo día - Reseteando contador de trades (anterior: {self.trades_today})")
             self.trades_today = 0
             self.last_trade_date = today
+            self.executed_trades_today = []  # Resetear también la lista de trades ejecutados
     
     def _check_daily_trade_limit(self, symbol: str) -> bool:
         """
@@ -570,11 +574,13 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             self.logger.info(f"[{symbol}] 📊 FVG detectado: {fvg_type} | Estado: {fvg.get('status')} | Entró: {fvg.get('entered_fvg')} | Salió: {fvg.get('exited_fvg')} | Exit Direction: {exit_direction}")
             self.logger.info(f"[{symbol}] 📊 FVG detalles: Bottom={fvg_bottom:.5f} | Top={fvg_top:.5f} | Precio actual={current_price_fvg:.5f}")
             
-            # ⚠️ VALIDACIÓN CRÍTICA: Verificar que la VELA EN FORMACIÓN haya entrado y salido del FVG
-            # REGLA OBLIGATORIA: La vela EN FORMACIÓN (actual, posición 0) DEBE haber entrado al FVG y salido en la dirección esperada
-            self.logger.info(f"[{symbol}] 🔍 Validando regla crítica: Vela EN FORMACIÓN debe entrar y salir del FVG...")
+            # ⚠️ VALIDACIÓN CRÍTICA: Verificar que la VELA EN FORMACIÓN (junto con las 2 anteriores) formen el FVG esperado
+            # REGLA OBLIGATORIA: 
+            # 1. Las 3 velas (en formación + 2 anteriores) DEBEN formar el FVG esperado
+            # 2. La VELA EN FORMACIÓN (posición 0) DEBE haber entrado al FVG y salido en la dirección esperada
+            self.logger.info(f"[{symbol}] 🔍 Validando regla crítica: Vela EN FORMACIÓN + 2 anteriores deben formar FVG esperado...")
             
-            # Obtener la vela EN FORMACIÓN (posición 0) para validar
+            # Obtener las 3 velas: vela en formación (posición 0) + 2 anteriores (posición 1 y 2)
             # Mapeo de timeframe
             timeframe_map = {
                 'M1': mt5.TIMEFRAME_M1,
@@ -586,145 +592,204 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 'D1': mt5.TIMEFRAME_D1,
             }
             tf = timeframe_map.get(self.entry_timeframe.upper(), mt5.TIMEFRAME_M5)
-            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 1)  # Obtener solo la vela en formación (posición 0)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 3)  # Obtener 3 velas: actual (pos 0), anterior1 (pos 1), anterior2 (pos 2)
             
-            if rates is None or len(rates) < 1:
-                self.logger.error(f"[{symbol}] ❌ No se pudo obtener la vela en formación")
+            if rates is None or len(rates) < 3:
+                self.logger.error(f"[{symbol}] ❌ No se pudo obtener las 3 velas necesarias (necesitamos vela en formación + 2 anteriores)")
                 return None
             
-            # La vela en posición 0 es la vela EN FORMACIÓN (actual)
-            forming_candle_data = rates[0]
-            forming_candle = {
-                'open': float(forming_candle_data['open']),
-                'high': float(forming_candle_data['high']),
-                'low': float(forming_candle_data['low']),
-                'close': float(forming_candle_data['close']),
-                'time': datetime.fromtimestamp(forming_candle_data['time'])
-            }
+            # Estructura: rates[0] = vela3 (en formación/actual), rates[1] = vela2 (anterior), rates[2] = vela1 (más antigua)
+            # Ordenar por tiempo para tener: vela1 (más antigua), vela2 (del medio), vela3 (actual/en formación)
+            candles_data = []
+            for i, candle_data in enumerate(rates):
+                candles_data.append({
+                    'open': float(candle_data['open']),
+                    'high': float(candle_data['high']),
+                    'low': float(candle_data['low']),
+                    'close': float(candle_data['close']),
+                    'time': datetime.fromtimestamp(candle_data['time']),
+                    'index': i  # Guardar índice original
+                })
             
-            self.logger.info(f"[{symbol}] 📊 Analizando vela EN FORMACIÓN: {forming_candle['time'].strftime('%Y-%m-%d %H:%M:%S')}")
+            # Ordenar por tiempo (más antigua primero)
+            candles_data = sorted(candles_data, key=lambda x: x['time'])
             
-            # Obtener información de la vela en formación
-            candle_high = forming_candle.get('high')
-            candle_low = forming_candle.get('low')
-            candle_close = forming_candle.get('close')
-            candle_open = forming_candle.get('open')
+            # vela1 = más antigua, vela2 = del medio, vela3 = actual/en formación
+            vela1 = candles_data[0]  # Más antigua
+            vela2 = candles_data[1]    # Del medio
+            vela3 = candles_data[2]    # Actual/en formación
+            
+            self.logger.info(f"[{symbol}] 📊 Analizando 3 velas para formar FVG:")
+            self.logger.info(f"[{symbol}]    • Vela1 (antigua): {vela1['time'].strftime('%Y-%m-%d %H:%M:%S')} | H={vela1['high']:.5f} L={vela1['low']:.5f}")
+            self.logger.info(f"[{symbol}]    • Vela2 (medio): {vela2['time'].strftime('%Y-%m-%d %H:%M:%S')} | H={vela2['high']:.5f} L={vela2['low']:.5f}")
+            self.logger.info(f"[{symbol}]    • Vela3 (EN FORMACIÓN): {vela3['time'].strftime('%Y-%m-%d %H:%M:%S')} | H={vela3['high']:.5f} L={vela3['low']:.5f} C={vela3['close']:.5f}")
+            
+            # VALIDACIÓN 0: Verificar que las 3 velas forman el FVG esperado
+            # Según la lógica del detector FVG:
+            # - FVG ALCISTA: vela1.low < vela3.high AND vela3.low > vela1.high (sin solapamiento)
+            #   Rango: entre vela1.high (bottom) y vela3.low (top)
+            # - FVG BAJISTA: vela1.high > vela3.low AND vela3.high < vela1.low (sin solapamiento)
+            #   Rango: entre vela3.high (bottom) y vela1.low (top)
+            
+            fvg_formed = False
+            calculated_fvg_bottom = None
+            calculated_fvg_top = None
+            calculated_fvg_type = None
+            
+            # Verificar FVG ALCISTA entre vela1 y vela3
+            if vela1['low'] < vela3['high'] and vela3['low'] > vela1['high']:
+                calculated_fvg_bottom = vela1['high']  # HIGH de vela1
+                calculated_fvg_top = vela3['low']      # LOW de vela3
+                calculated_fvg_type = 'ALCISTA'
+                fvg_formed = True
+                self.logger.info(f"[{symbol}] ✅ FVG ALCISTA formado por las 3 velas: {calculated_fvg_bottom:.5f} - {calculated_fvg_top:.5f}")
+            
+            # Verificar FVG BAJISTA entre vela1 y vela3
+            elif vela1['high'] > vela3['low'] and vela3['high'] < vela1['low']:
+                calculated_fvg_bottom = vela3['high']    # HIGH de vela3
+                calculated_fvg_top = vela1['low']      # LOW de vela1
+                calculated_fvg_type = 'BAJISTA'
+                fvg_formed = True
+                self.logger.info(f"[{symbol}] ✅ FVG BAJISTA formado por las 3 velas: {calculated_fvg_bottom:.5f} - {calculated_fvg_top:.5f}")
+            
+            if not fvg_formed:
+                self.logger.info(f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Las 3 velas NO forman un FVG válido")
+                return None
+            
+            # Verificar que el FVG formado es del tipo esperado según el Turtle Soup
+            if calculated_fvg_type != fvg_type:
+                self.logger.info(
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: FVG formado es {calculated_fvg_type} pero esperábamos {fvg_type} "
+                    f"(según Turtle Soup {sweep_type} + dirección {direction})"
+                )
+                return None
+            
+            # Verificar que el FVG calculado coincide con el detectado (con tolerancia pequeña)
+            tolerance = abs(fvg_top - fvg_bottom) * 0.01  # 1% de tolerancia
+            if abs(calculated_fvg_bottom - fvg_bottom) > tolerance or abs(calculated_fvg_top - fvg_top) > tolerance:
+                self.logger.warning(
+                    f"[{symbol}] ⚠️  FVG calculado difiere del detectado: "
+                    f"Calculado: {calculated_fvg_bottom:.5f}-{calculated_fvg_top:.5f} | "
+                    f"Detectado: {fvg_bottom:.5f}-{fvg_top:.5f}"
+                )
+                # Usar el FVG calculado de las velas (más confiable)
+                fvg_bottom = calculated_fvg_bottom
+                fvg_top = calculated_fvg_top
+            
+            # Obtener información de la vela EN FORMACIÓN (vela3)
+            candle_high = vela3.get('high')
+            candle_low = vela3.get('low')
+            candle_close = vela3.get('close')
+            candle_open = vela3.get('open')
             
             if candle_high is None or candle_low is None or candle_close is None:
                 self.logger.error(f"[{symbol}] ❌ Vela en formación no tiene datos completos")
                 return None
             
-            # VALIDACIÓN 1: La vela EN FORMACIÓN DEBE haber entrado al FVG
-            # La vela entró SOLO si su HIGH o LOW está DENTRO del rango del FVG
-            # NO basta con que se superponga, debe estar REALMENTE dentro
+            # Obtener precio actual (bid) para validar salida
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                self.logger.error(f"[{symbol}] ❌ No se pudo obtener precio actual")
+                return None
+            current_price = float(tick.bid)
+            
+            # VALIDACIÓN 1: La vela EN FORMACIÓN (vela3) DEBE haber entrado al FVG
+            # REGLA ESPECÍFICA POR TIPO DE FVG:
+            # - FVG BAJISTA: Usar HIGH de la vela en formación para saber si entró
+            # - FVG ALCISTA: Usar LOW de la vela en formación para saber si entró
             candle_entered_fvg = False
             
-            # Caso 1: HIGH está dentro del FVG (fvg_bottom <= high <= fvg_top)
-            if fvg_bottom <= candle_high <= fvg_top:
-                candle_entered_fvg = True
-                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: HIGH ({candle_high:.5f}) está dentro del FVG")
-            
-            # Caso 2: LOW está dentro del FVG (fvg_bottom <= low <= fvg_top)
-            elif fvg_bottom <= candle_low <= fvg_top:
-                candle_entered_fvg = True
-                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: LOW ({candle_low:.5f}) está dentro del FVG")
-            
-            # Caso 3: Vela cruzó completamente el FVG (low < bottom Y high > top)
-            elif candle_low < fvg_bottom and candle_high > fvg_top:
-                candle_entered_fvg = True
-                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: Cruzó completamente (LOW={candle_low:.5f} < Bottom={fvg_bottom:.5f} Y HIGH={candle_high:.5f} > Top={fvg_top:.5f})")
-            
-            # Caso 4: Vela contiene completamente el FVG (low <= bottom Y high >= top)
-            elif candle_low <= fvg_bottom and candle_high >= fvg_top:
-                candle_entered_fvg = True
-                self.logger.info(f"[{symbol}] 📍 Vela entró al FVG: Contiene completamente el FVG")
+            if calculated_fvg_type == 'BAJISTA':
+                # FVG BAJISTA: El HIGH de la vela en formación debe estar dentro del FVG
+                if fvg_bottom <= candle_high <= fvg_top:
+                    candle_entered_fvg = True
+                    self.logger.info(f"[{symbol}] 📍 Vela entró al FVG BAJISTA: HIGH ({candle_high:.5f}) está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})")
+                else:
+                    self.logger.info(
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Para FVG BAJISTA, HIGH de vela en formación ({candle_high:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})"
+                    )
+            elif calculated_fvg_type == 'ALCISTA':
+                # FVG ALCISTA: El LOW de la vela en formación debe estar dentro del FVG
+                if fvg_bottom <= candle_low <= fvg_top:
+                    candle_entered_fvg = True
+                    self.logger.info(f"[{symbol}] 📍 Vela entró al FVG ALCISTA: LOW ({candle_low:.5f}) está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})")
+                else:
+                    self.logger.info(
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Para FVG ALCISTA, LOW de vela en formación ({candle_low:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})"
+                    )
             
             if not candle_entered_fvg:
                 self.logger.info(
-                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN NO entró al FVG | "
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN NO entró al FVG {calculated_fvg_type} | "
                     f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
-                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | "
-                    f"Análisis: HIGH dentro FVG? {fvg_bottom <= candle_high <= fvg_top} | "
-                    f"LOW dentro FVG? {fvg_bottom <= candle_low <= fvg_top}"
+                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
                 )
                 return None
             
-            self.logger.info(f"[{symbol}] ✅ Vela EN FORMACIÓN entró al FVG: H={candle_high:.5f} L={candle_low:.5f}")
+            self.logger.info(f"[{symbol}] ✅ Vela EN FORMACIÓN entró al FVG {calculated_fvg_type}: H={candle_high:.5f} L={candle_low:.5f}")
             
-            # VALIDACIÓN 2: La vela EN FORMACIÓN DEBE haber salido del FVG en la dirección correcta
-            # IMPORTANTE: Primero debe haber entrado (ya validado arriba), ahora debe salir
-            # Para salir, el CLOSE de la vela debe estar FUERA del FVG en la dirección esperada
-            candle_exited_fvg = False
-            candle_exit_direction = None
+            # VALIDACIÓN 2: El precio actual DEBE haber salido del FVG en la dirección correcta
+            # IMPORTANTE: Usamos el precio actual (bid) para validar salida, no el CLOSE de la vela
+            # porque la vela está en formación y el CLOSE puede cambiar
+            price_exited_fvg = False
+            exit_direction = None
             
-            # Verificar que el CLOSE esté FUERA del rango del FVG
-            close_outside_fvg = (candle_close < fvg_bottom) or (candle_close > fvg_top)
+            # Verificar que el precio actual esté FUERA del rango del FVG
+            price_outside_fvg = (current_price < fvg_bottom) or (current_price > fvg_top)
             
-            if not close_outside_fvg:
+            if not price_outside_fvg:
                 self.logger.info(
-                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN aún NO salió del FVG | "
-                    f"Close={candle_close:.5f} está DENTRO del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: El precio actual ({current_price:.5f}) aún NO salió del FVG | "
+                    f"Precio está DENTRO del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
                     f"Debe estar FUERA del FVG en dirección {direction}"
                 )
                 return None
             
-            # Ahora verificar la dirección de salida
-            if direction == 'BULLISH':
-                # Esperamos salida alcista: close debe estar ARRIBA del FVG
-                if candle_close > fvg_top:
-                    candle_exited_fvg = True
-                    candle_exit_direction = 'ALCISTA'
-                    self.logger.info(f"[{symbol}] 📍 Vela salió del FVG: CLOSE ({candle_close:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f})")
+            # Verificar la dirección de salida según el tipo de FVG y dirección esperada
+            if calculated_fvg_type == 'BAJISTA' and direction == 'BEARISH':
+                # FVG BAJISTA + dirección BEARISH: precio debe estar DEBAJO del FVG
+                if current_price < fvg_bottom:
+                    price_exited_fvg = True
+                    exit_direction = 'BAJISTA'
+                    self.logger.info(f"[{symbol}] 📍 Precio salió del FVG BAJISTA: Precio actual ({current_price:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f})")
                 else:
-                    # Close está debajo del FVG pero esperábamos salida alcista
+                    # Precio está arriba del FVG pero esperábamos salida bajista
                     self.logger.info(
-                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Vela salió del FVG pero en dirección incorrecta | "
-                        f"Close={candle_close:.5f} está DEBAJO del FVG (esperábamos ARRIBA para {direction})"
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Precio salió del FVG pero en dirección incorrecta | "
+                        f"Precio actual={current_price:.5f} está ARRIBA del FVG (esperábamos DEBAJO para {direction})"
                     )
                     return None
-            elif direction == 'BEARISH':
-                # Esperamos salida bajista: close debe estar DEBAJO del FVG
-                if candle_close < fvg_bottom:
-                    candle_exited_fvg = True
-                    candle_exit_direction = 'BAJISTA'
-                    self.logger.info(f"[{symbol}] 📍 Vela salió del FVG: CLOSE ({candle_close:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f})")
+            elif calculated_fvg_type == 'ALCISTA' and direction == 'BULLISH':
+                # FVG ALCISTA + dirección BULLISH: precio debe estar ARRIBA del FVG
+                if current_price > fvg_top:
+                    price_exited_fvg = True
+                    exit_direction = 'ALCISTA'
+                    self.logger.info(f"[{symbol}] 📍 Precio salió del FVG ALCISTA: Precio actual ({current_price:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f})")
                 else:
-                    # Close está arriba del FVG pero esperábamos salida bajista
+                    # Precio está debajo del FVG pero esperábamos salida alcista
                     self.logger.info(
-                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Vela salió del FVG pero en dirección incorrecta | "
-                        f"Close={candle_close:.5f} está ARRIBA del FVG (esperábamos DEBAJO para {direction})"
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Precio salió del FVG pero en dirección incorrecta | "
+                        f"Precio actual={current_price:.5f} está DEBAJO del FVG (esperábamos ARRIBA para {direction})"
                     )
                     return None
-            
-            if not candle_exited_fvg:
+            else:
+                # Tipo de FVG no coincide con dirección esperada
                 self.logger.info(
-                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN NO salió del FVG en dirección {direction} | "
-                    f"Close={candle_close:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: FVG {calculated_fvg_type} no coincide con dirección {direction} esperada"
+                )
+                return None
+            
+            if not price_exited_fvg:
+                self.logger.info(
+                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: El precio NO salió del FVG en dirección {direction} | "
+                    f"Precio actual={current_price:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
                 )
                 return None
             
             self.logger.info(
-                f"[{symbol}] ✅ Vela EN FORMACIÓN salió del FVG en dirección correcta: "
-                f"Close={candle_close:.5f} | Dirección={candle_exit_direction} | Esperada={direction}"
-            )
-            
-            # VALIDACIÓN 3: La dirección de salida de la vela EN FORMACIÓN DEBE coincidir con la dirección del Turtle Soup
-            normalized_candle_exit = None
-            if candle_exit_direction == 'ALCISTA':
-                normalized_candle_exit = 'BULLISH'
-            elif candle_exit_direction == 'BAJISTA':
-                normalized_candle_exit = 'BEARISH'
-            
-            if normalized_candle_exit != direction:
-                self.logger.info(
-                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN salió del FVG en dirección {candle_exit_direction} ({normalized_candle_exit}), "
-                    f"pero necesitamos {direction} (según Turtle Soup H4)"
-                )
-                return None
-            
-            self.logger.info(
-                f"[{symbol}] ✅ REGLA CUMPLIDA: La vela EN FORMACIÓN entró y salió del FVG en la dirección correcta ({direction}) | "
-                f"Vela: O={candle_open:.5f} H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f}"
+                f"[{symbol}] ✅ REGLA CUMPLIDA: Vela EN FORMACIÓN entró al FVG {calculated_fvg_type} y precio salió en dirección {exit_direction} | "
+                f"Vela: O={candle_open:.5f} H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
+                f"Precio actual: {current_price:.5f}"
             )
             
             # Determinar qué tipo de FVG buscamos según el barrido de H4
@@ -902,22 +967,24 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             Dict con resultado de la orden
         """
         try:
-            # ⚠️ VALIDACIÓN CRÍTICA FINAL: Verificar que la VELA EN FORMACIÓN haya entrado y salido del FVG ANTES de ejecutar
+            # ⚠️ CONTROL DE DUPLICADOS: Verificar que no se haya ejecutado ya una orden para esta señal de Turtle Soup
+            self._reset_daily_trades_counter()
+            
+            # Crear identificador único para esta señal de Turtle Soup
+            turtle_soup_id = f"{symbol}_{turtle_soup.get('swept_candle', 'unknown')}_{turtle_soup.get('sweep_type', 'unknown')}_{turtle_soup.get('target_price', 0):.5f}"
+            
+            if turtle_soup_id in self.executed_trades_today:
+                self.logger.warning(
+                    f"[{symbol}] ⚠️  ORDEN DUPLICADA DETECTADA: Ya se ejecutó una orden para esta señal de Turtle Soup hoy | "
+                    f"ID: {turtle_soup_id} | Cancelando orden duplicada"
+                )
+                return None
+            
+            # ⚠️ VALIDACIÓN CRÍTICA FINAL: Verificar que la VELA EN FORMACIÓN (junto con las 2 anteriores) formen el FVG esperado
             # Esta es la validación final más estricta antes de ejecutar la orden
-            self.logger.info(f"[{symbol}] 🔍 Validación final estricta: Verificando vela EN FORMACIÓN entró y salió del FVG...")
+            self.logger.info(f"[{symbol}] 🔍 Validación final estricta: Verificando vela EN FORMACIÓN + 2 anteriores forman FVG esperado...")
             
-            # Detectar FVG actual (puede haber cambiado desde que se detectó la señal)
-            current_fvg = detect_fvg(symbol, self.entry_timeframe)
-            if not current_fvg:
-                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: No se detecta FVG en {self.entry_timeframe} - Cancelando orden")
-                return None
-            
-            # Verificar que el FVG es el esperado según el Turtle Soup
-            if not self._is_expected_fvg(current_fvg, turtle_soup):
-                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: El FVG detectado no es el esperado - Cancelando orden")
-                return None
-            
-            # Obtener la vela EN FORMACIÓN actual para validación final
+            # Obtener las 3 velas: vela en formación (posición 0) + 2 anteriores (posición 1 y 2)
             timeframe_map = {
                 'M1': mt5.TIMEFRAME_M1,
                 'M5': mt5.TIMEFRAME_M5,
@@ -928,64 +995,156 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 'D1': mt5.TIMEFRAME_D1,
             }
             tf = timeframe_map.get(self.entry_timeframe.upper(), mt5.TIMEFRAME_M5)
-            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 1)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 3)  # Obtener 3 velas: actual (pos 0), anterior1 (pos 1), anterior2 (pos 2)
             
-            if rates is None or len(rates) < 1:
-                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: No se pudo obtener la vela en formación - Cancelando orden")
+            if rates is None or len(rates) < 3:
+                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: No se pudo obtener las 3 velas necesarias - Cancelando orden")
                 return None
             
-            forming_candle_data = rates[0]
-            candle_high = float(forming_candle_data['high'])
-            candle_low = float(forming_candle_data['low'])
-            candle_close = float(forming_candle_data['close'])
-            fvg_bottom = current_fvg.get('fvg_bottom')
-            fvg_top = current_fvg.get('fvg_top')
-            direction = entry_signal['direction']
+            # Ordenar por tiempo para tener: vela1 (más antigua), vela2 (del medio), vela3 (actual/en formación)
+            candles_data = []
+            for i, candle_data in enumerate(rates):
+                candles_data.append({
+                    'open': float(candle_data['open']),
+                    'high': float(candle_data['high']),
+                    'low': float(candle_data['low']),
+                    'close': float(candle_data['close']),
+                    'time': datetime.fromtimestamp(candle_data['time'])
+                })
             
-            # VALIDACIÓN FINAL 1: La vela DEBE haber entrado al FVG (HIGH o LOW dentro del rango)
-            candle_entered = (
-                (fvg_bottom <= candle_high <= fvg_top) or  # HIGH dentro del FVG
-                (fvg_bottom <= candle_low <= fvg_top) or   # LOW dentro del FVG
-                (candle_low < fvg_bottom and candle_high > fvg_top) or  # Cruzó completamente
-                (candle_low <= fvg_bottom and candle_high >= fvg_top)  # Contiene completamente
-            )
+            candles_data = sorted(candles_data, key=lambda x: x['time'])
+            vela1 = candles_data[0]  # Más antigua
+            vela2 = candles_data[1]    # Del medio
+            vela3 = candles_data[2]    # Actual/en formación
+            
+            # VALIDACIÓN FINAL 0: Verificar que las 3 velas forman el FVG esperado
+            fvg_formed = False
+            calculated_fvg_bottom = None
+            calculated_fvg_top = None
+            calculated_fvg_type = None
+            
+            # Verificar FVG ALCISTA entre vela1 y vela3
+            if vela1['low'] < vela3['high'] and vela3['low'] > vela1['high']:
+                calculated_fvg_bottom = vela1['high']
+                calculated_fvg_top = vela3['low']
+                calculated_fvg_type = 'ALCISTA'
+                fvg_formed = True
+            
+            # Verificar FVG BAJISTA entre vela1 y vela3
+            elif vela1['high'] > vela3['low'] and vela3['high'] < vela1['low']:
+                calculated_fvg_bottom = vela3['high']
+                calculated_fvg_top = vela1['low']
+                calculated_fvg_type = 'BAJISTA'
+                fvg_formed = True
+            
+            if not fvg_formed:
+                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Las 3 velas NO forman un FVG válido - Cancelando orden")
+                return None
+            
+            # Verificar que el FVG formado es del tipo esperado
+            expected_fvg_type = None
+            sweep_type = turtle_soup.get('sweep_type')
+            direction = entry_signal['direction']
+            if sweep_type == 'BULLISH_SWEEP' and direction == 'BEARISH':
+                expected_fvg_type = 'BAJISTA'
+            elif sweep_type == 'BEARISH_SWEEP' and direction == 'BULLISH':
+                expected_fvg_type = 'ALCISTA'
+            
+            if calculated_fvg_type != expected_fvg_type:
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: FVG formado es {calculated_fvg_type} pero esperábamos {expected_fvg_type} - Cancelando orden"
+                )
+                return None
+            
+            # Usar el FVG calculado
+            fvg_bottom = calculated_fvg_bottom
+            fvg_top = calculated_fvg_top
+            
+            # Obtener información de la vela EN FORMACIÓN (vela3)
+            candle_high = vela3.get('high')
+            candle_low = vela3.get('low')
+            candle_close = vela3.get('close')
+            candle_time = vela3.get('time')
+            
+            # Obtener precio actual (bid) para validar salida
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                self.logger.error(f"[{symbol}] ❌ VALIDACIÓN FALLIDA: No se pudo obtener precio actual - Cancelando orden")
+                return None
+            current_price = float(tick.bid)
+            
+            self.logger.info(f"[{symbol}] 📊 Validando vela EN FORMACIÓN: {candle_time.strftime('%Y-%m-%d %H:%M:%S')} | H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | Precio actual: {current_price:.5f}")
+            
+            # VALIDACIÓN FINAL 1: La vela EN FORMACIÓN (vela3) DEBE haber entrado al FVG
+            # REGLA ESPECÍFICA POR TIPO DE FVG:
+            # - FVG BAJISTA: Usar HIGH de la vela en formación
+            # - FVG ALCISTA: Usar LOW de la vela en formación
+            candle_entered = False
+            
+            if calculated_fvg_type == 'BAJISTA':
+                # FVG BAJISTA: HIGH debe estar dentro del FVG
+                if fvg_bottom <= candle_high <= fvg_top:
+                    candle_entered = True
+                else:
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG BAJISTA, HIGH de vela en formación ({candle_high:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
+                    )
+                    return None
+            elif calculated_fvg_type == 'ALCISTA':
+                # FVG ALCISTA: LOW debe estar dentro del FVG
+                if fvg_bottom <= candle_low <= fvg_top:
+                    candle_entered = True
+                else:
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG ALCISTA, LOW de vela en formación ({candle_low:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
+                    )
+                    return None
             
             if not candle_entered:
                 self.logger.error(
-                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO entró al FVG | "
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO entró al FVG {calculated_fvg_type} | "
                     f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
                     f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} - Cancelando orden"
                 )
                 return None
             
-            # VALIDACIÓN FINAL 2: La vela DEBE haber salido del FVG (CLOSE fuera del rango en dirección correcta)
-            close_outside = (candle_close < fvg_bottom) or (candle_close > fvg_top)
-            if not close_outside:
+            # VALIDACIÓN FINAL 2: El precio actual DEBE haber salido del FVG en la dirección correcta
+            # Usamos precio actual (bid) para validar salida, no el CLOSE de la vela
+            price_outside = (current_price < fvg_bottom) or (current_price > fvg_top)
+            if not price_outside:
                 self.logger.error(
-                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO salió del FVG | "
-                    f"Close={candle_close:.5f} está DENTRO del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: El precio actual ({current_price:.5f}) NO salió del FVG | "
+                    f"Precio está DENTRO del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
                 )
                 return None
             
             # VALIDACIÓN FINAL 3: La dirección de salida DEBE ser correcta
-            if direction == 'BULLISH' and candle_close <= fvg_top:
+            if calculated_fvg_type == 'BAJISTA' and direction == 'BEARISH':
+                # FVG BAJISTA + dirección BEARISH: precio debe estar DEBAJO del FVG
+                if current_price >= fvg_bottom:
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG pero en dirección incorrecta | "
+                        f"Precio actual={current_price:.5f} debe estar DEBAJO de {fvg_bottom:.5f} para {direction} - Cancelando orden"
+                    )
+                    return None
+            elif calculated_fvg_type == 'ALCISTA' and direction == 'BULLISH':
+                # FVG ALCISTA + dirección BULLISH: precio debe estar ARRIBA del FVG
+                if current_price <= fvg_top:
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG pero en dirección incorrecta | "
+                        f"Precio actual={current_price:.5f} debe estar ARRIBA de {fvg_top:.5f} para {direction} - Cancelando orden"
+                    )
+                    return None
+            else:
                 self.logger.error(
-                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Vela salió del FVG pero en dirección incorrecta | "
-                    f"Close={candle_close:.5f} debe estar ARRIBA de {fvg_top:.5f} para {direction} - Cancelando orden"
-                )
-                return None
-            
-            if direction == 'BEARISH' and candle_close >= fvg_bottom:
-                self.logger.error(
-                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Vela salió del FVG pero en dirección incorrecta | "
-                    f"Close={candle_close:.5f} debe estar DEBAJO de {fvg_bottom:.5f} para {direction} - Cancelando orden"
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: FVG {calculated_fvg_type} no coincide con dirección {direction} esperada - Cancelando orden"
                 )
                 return None
             
             self.logger.info(
-                f"[{symbol}] ✅ VALIDACIÓN FINAL EXITOSA: Vela EN FORMACIÓN entró y salió del FVG correctamente | "
+                f"[{symbol}] ✅ VALIDACIÓN FINAL EXITOSA: Vela EN FORMACIÓN entró al FVG {calculated_fvg_type} y precio salió correctamente | "
                 f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
-                f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | Dirección: {direction}"
+                f"Precio actual: {current_price:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | Dirección: {direction}"
             )
             
             # Verificar límite de trades por día
@@ -1055,6 +1214,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 # Incrementar contador de trades del día
                 self.trades_today += 1
                 
+                # Registrar esta señal como ejecutada para evitar duplicados
+                turtle_soup_id = f"{symbol}_{turtle_soup.get('swept_candle', 'unknown')}_{turtle_soup.get('sweep_type', 'unknown')}_{turtle_soup.get('target_price', 0):.5f}"
+                self.executed_trades_today.append(turtle_soup_id)
+                
                 self.logger.info(f"[{symbol}] {'='*70}")
                 self.logger.info(f"[{symbol}] ✅ ORDEN EJECUTADA EXITOSAMENTE")
                 self.logger.info(f"[{symbol}] {'='*70}")
@@ -1066,6 +1229,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f}")
                 self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1")
                 self.logger.info(f"[{symbol}] 📊 Trades hoy: {self.trades_today}/{self.max_trades_per_day}")
+                self.logger.info(f"[{symbol}] 🔒 Señal registrada para evitar duplicados: {turtle_soup_id}")
                 self.logger.info(f"[{symbol}] {'='*70}")
                 return {
                     'action': f'{direction}_EXECUTED',
