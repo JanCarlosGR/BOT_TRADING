@@ -4,9 +4,10 @@ Maneja la lógica de horarios de trading
 """
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pytz import timezone as tz
-from typing import Dict
+from typing import Dict, Optional, Tuple
+from Base.news_checker import validate_trading_day
 
 
 class TradingHoursManager:
@@ -46,6 +47,10 @@ class TradingHoursManager:
         """
         Verifica si estamos en horario operativo
         
+        Valida:
+        1. Si es día operativo (lunes a viernes, no feriados)
+        2. Si estamos en el rango de horas configurado
+        
         Returns:
             True si estamos en horario operativo, False en caso contrario
         """
@@ -54,9 +59,15 @@ class TradingHoursManager:
         
         # Obtener hora actual en la zona horaria configurada
         now_tz = datetime.now(self.tz)
-        current_time = now_tz.time()
         
-        # Verificar si la hora actual está entre start_time y end_time
+        # PRIMERO: Verificar si es día operativo (lunes a viernes, no feriados)
+        is_trading_day, day_reason, holidays = validate_trading_day(now_tz)
+        if not is_trading_day:
+            # No es día operativo (fin de semana o feriado)
+            return False
+        
+        # SEGUNDO: Verificar si la hora actual está entre start_time y end_time
+        current_time = now_tz.time()
         if self.start_time <= self.end_time:
             # Horario normal (ej: 09:00 - 13:00)
             is_trading = self.start_time <= current_time <= self.end_time
@@ -66,41 +77,82 @@ class TradingHoursManager:
         
         return is_trading
     
-    def get_next_trading_time(self) -> datetime:
+    def is_trading_day(self) -> Tuple[bool, str, list]:
         """
-        Obtiene la próxima hora de inicio de trading
+        Verifica si el día actual es operativo (lunes a viernes, no feriados)
         
         Returns:
-            datetime de la próxima hora de inicio
+            tuple: (is_trading_day: bool, reason: str, holidays: List[Dict])
+        """
+        now_tz = datetime.now(self.tz)
+        return validate_trading_day(now_tz)
+    
+    def get_next_trading_time(self) -> datetime:
+        """
+        Obtiene la próxima hora de inicio de trading (considerando días operativos)
+        
+        Busca el próximo día operativo (lunes a viernes, no feriados) y hora de inicio.
+        
+        Returns:
+            datetime de la próxima hora de inicio en un día operativo
         """
         now_tz = datetime.now(self.tz)
         current_time = now_tz.time()
         
-        # Si ya pasó la hora de inicio hoy, usar mañana
-        if current_time > self.start_time:
-            next_date = now_tz.date()
-            # Si el horario termina después de medianoche y ya pasó, usar hoy
-            if self.start_time > self.end_time and current_time <= self.end_time:
-                next_date = now_tz.date()
-            else:
-                from datetime import timedelta
-                next_date = (now_tz + timedelta(days=1)).date()
-        else:
-            next_date = now_tz.date()
+        # Verificar si hoy es día operativo y si ya pasó la hora de inicio
+        is_trading_day_today, _, _ = validate_trading_day(now_tz)
         
-        next_datetime = self.tz.localize(datetime.combine(next_date, self.start_time))
-        return next_datetime
+        # Si hoy es día operativo y aún no ha pasado la hora de inicio, usar hoy
+        if is_trading_day_today and current_time < self.start_time:
+            return self.tz.localize(datetime.combine(now_tz.date(), self.start_time))
+        
+        # Si hoy es día operativo pero ya pasó la hora, o si no es día operativo,
+        # buscar el próximo día operativo
+        next_date = now_tz.date()
+        max_days_ahead = 10  # Límite de seguridad para evitar bucle infinito
+        
+        for _ in range(max_days_ahead):
+            next_date = next_date + timedelta(days=1)
+            next_datetime = self.tz.localize(datetime.combine(next_date, self.start_time))
+            is_trading_day_next, _, _ = validate_trading_day(next_datetime)
+            
+            if is_trading_day_next:
+                return next_datetime
+        
+        # Si no se encontró día operativo en los próximos 10 días, retornar mañana como fallback
+        self.logger.warning("No se encontró día operativo en los próximos 10 días, usando mañana como fallback")
+        next_date = now_tz.date() + timedelta(days=1)
+        return self.tz.localize(datetime.combine(next_date, self.start_time))
     
     def get_time_until_trading(self) -> str:
         """
         Obtiene tiempo restante hasta el próximo horario operativo
         
         Returns:
-            String con tiempo restante formateado
+            String con tiempo restante formateado o razón por la que no se puede operar
         """
         if self.is_trading_time():
             return "En horario operativo"
         
+        # Verificar si es día operativo
+        is_trading_day, day_reason, holidays = self.is_trading_day()
+        
+        if not is_trading_day:
+            # No es día operativo - mostrar razón y próximo día operativo
+            next_trading = self.get_next_trading_time()
+            now_tz = datetime.now(self.tz)
+            delta = next_trading - now_tz
+            
+            days = delta.days
+            hours, remainder = divmod(delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            if days > 0:
+                return f"{day_reason} - Próximo día operativo en {days}d {hours}h {minutes}m"
+            else:
+                return f"{day_reason} - Próximo día operativo en {hours}h {minutes}m"
+        
+        # Es día operativo pero fuera de horario
         next_trading = self.get_next_trading_time()
         now_tz = datetime.now(self.tz)
         delta = next_trading - now_tz

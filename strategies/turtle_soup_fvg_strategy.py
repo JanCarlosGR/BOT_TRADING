@@ -74,9 +74,6 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         self.monitoring_fvg = False  # Indica si estamos monitoreando un FVG en tiempo real
         self.monitoring_fvg_data = None  # Datos del FVG que estamos monitoreando (turtle_soup, fvg_info)
         
-        # Control de trades ejecutados para evitar duplicados
-        self.executed_trades_today = []  # Lista de señales ya ejecutadas hoy (por Turtle Soup)
-        
         self.logger.info(f"TurtleSoupFVGStrategy inicializada - Entry: {self.entry_timeframe}, RR: {self.min_rr}")
         self.logger.info(f"Riesgo por trade: {self.risk_per_trade_percent}% | Máximo trades/día: {self.max_trades_per_day}")
     
@@ -278,22 +275,63 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             # Actualizar datos del FVG
             self.monitoring_fvg_data['fvg'] = fvg
             
-            # Evaluar condiciones de entrada
+            # Obtener precio actual para verificar estado
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                self.logger.error(f"[{symbol}] ❌ No se pudo obtener precio actual durante monitoreo")
+                return None
+            
+            current_price = float(tick.bid)
+            fvg_bottom = fvg.get('fvg_bottom')
+            fvg_top = fvg.get('fvg_top')
+            fvg_type = fvg.get('fvg_type')
+            direction = turtle_soup.get('direction')
+            
+            # Verificar si el precio está dentro del FVG
+            price_inside_fvg = (fvg_bottom <= current_price <= fvg_top) if fvg_bottom and fvg_top else False
+            
+            # Si el precio está dentro del FVG, esperar a que salga en la dirección esperada
+            if price_inside_fvg:
+                # Log cada 10 segundos para no saturar
+                import time
+                current_time = time.time()
+                if not hasattr(self, '_last_inside_fvg_log') or (current_time - self._last_inside_fvg_log) >= 10:
+                    # Determinar dirección esperada de salida
+                    expected_exit = None
+                    if fvg_type == 'BAJISTA' and direction == 'BEARISH':
+                        expected_exit = "DEBAJO"
+                    elif fvg_type == 'ALCISTA' and direction == 'BULLISH':
+                        expected_exit = "ARRIBA"
+                    
+                    self.logger.info(
+                        f"[{symbol}] ⏳ MONITOREO INTENSIVO: Precio DENTRO del FVG {fvg_type} | "
+                        f"Precio actual: {current_price:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | "
+                        f"Esperando salida hacia {expected_exit} en dirección {direction}"
+                    )
+                    self._last_inside_fvg_log = current_time
+                # NO intentar ejecutar orden mientras el precio está dentro
+                return None
+            
+            # El precio está fuera del FVG - evaluar condiciones de entrada
             entry_signal = self._find_fvg_entry(symbol, turtle_soup)
             
             if entry_signal:
                 # Condiciones cumplidas - ejecutar orden y cancelar monitoreo
-                self.logger.info(f"[{symbol}] ✅ Condiciones cumplidas durante monitoreo intensivo - Ejecutando orden")
+                self.logger.info(f"[{symbol}] ✅ Condiciones cumplidas durante monitoreo intensivo - Precio salió del FVG en dirección esperada - Ejecutando orden")
                 self.monitoring_fvg = False
                 self.monitoring_fvg_data = None
                 return self._execute_order(symbol, turtle_soup, entry_signal)
             
-            # Condiciones aún no cumplidas - seguir monitoreando
-            # Log solo cada 10 segundos para no saturar
+            # El precio salió del FVG pero no en la dirección esperada, o condiciones no cumplidas
+            # Log cada 10 segundos para no saturar
             import time
             current_time = time.time()
             if not hasattr(self, '_last_monitor_log') or (current_time - self._last_monitor_log) >= 10:
-                self.logger.debug(f"[{symbol}] 🔄 Monitoreando FVG en tiempo real... (Estado: {fvg.get('status')}, Entró: {fvg.get('entered_fvg')}, Salió: {fvg.get('exited_fvg')})")
+                self.logger.debug(
+                    f"[{symbol}] 🔄 Monitoreando FVG en tiempo real... "
+                    f"(Estado: {fvg.get('status')}, Entró: {fvg.get('entered_fvg')}, Salió: {fvg.get('exited_fvg')}, "
+                    f"Precio: {current_price:.5f})"
+                )
                 self._last_monitor_log = current_time
             
             return None
@@ -312,22 +350,48 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 self.logger.info(f"🔄 Nuevo día - Reseteando contador de trades (anterior: {self.trades_today})")
             self.trades_today = 0
             self.last_trade_date = today
-            self.executed_trades_today = []  # Resetear también la lista de trades ejecutados
     
     def _check_daily_trade_limit(self, symbol: str) -> bool:
         """
         Verifica si se puede ejecutar un trade según el límite diario
         
+        Esta verificación incluye:
+        1. Límite de trades por día (max_trades_per_day) - desde base de datos
+        2. Posiciones abiertas (no permite nueva entrada si hay una posición activa)
+        3. Cierre de día por primer TP (si la primera entrada cerró con TP, no colocar más órdenes)
+        
         Args:
             symbol: Símbolo a verificar
             
         Returns:
-            True si se puede ejecutar, False si se alcanzó el límite
+            True si se puede ejecutar, False si hay algún bloqueo
         """
-        self._reset_daily_trades_counter()
+        # 3. Verificar si el primer trade del día cerró con TP (cerrar día operativo)
+        if self._check_first_trade_tp_closure(symbol):
+            return False
         
-        if self.trades_today >= self.max_trades_per_day:
-            self.logger.info(f"[{symbol}] ⏸️  Límite de trades diarios alcanzado: {self.trades_today}/{self.max_trades_per_day}")
+        # 1. Verificar límite de trades diarios desde base de datos
+        db_manager = self._get_db_manager()
+        if db_manager.enabled:
+            # Obtener conteo desde BD (más confiable)
+            strategy_name = 'turtle_soup_fvg'  # Nombre de esta estrategia
+            trades_today_db = db_manager.count_trades_today(strategy=strategy_name)
+            if trades_today_db >= self.max_trades_per_day:
+                self.logger.info(f"[{symbol}] ⏸️  Límite de trades diarios alcanzado (desde BD): {trades_today_db}/{self.max_trades_per_day}")
+                # Actualizar contador local para consistencia
+                self.trades_today = trades_today_db
+                return False
+            # Actualizar contador local
+            self.trades_today = trades_today_db
+        else:
+            # Si BD no está disponible, usar contador local
+            self._reset_daily_trades_counter()
+            if self.trades_today >= self.max_trades_per_day:
+                self.logger.info(f"[{symbol}] ⏸️  Límite de trades diarios alcanzado: {self.trades_today}/{self.max_trades_per_day}")
+                return False
+        
+        # 2. Verificar si hay posiciones abiertas (no permitir nueva entrada mientras hay posición activa)
+        if self._has_open_positions(symbol):
             return False
         
         return True
@@ -707,36 +771,50 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 return None
             current_price = float(tick.bid)
             
-            # VALIDACIÓN 1: La vela EN FORMACIÓN (vela3) DEBE haber entrado al FVG
-            # REGLA ESPECÍFICA POR TIPO DE FVG:
-            # - FVG BAJISTA: Usar HIGH de la vela en formación para saber si entró
-            # - FVG ALCISTA: Usar LOW de la vela en formación para saber si entró
+            self.logger.info(f"[{symbol}] 📊 Vela EN FORMACIÓN: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | Precio actual: {current_price:.5f}")
+            self.logger.info(f"[{symbol}] 📊 FVG calculado desde velas: {calculated_fvg_type} | Bottom: {fvg_bottom:.5f} | Top: {fvg_top:.5f}")
+            
+            # ⚠️ VALIDACIÓN CRÍTICA 1: La vela EN FORMACIÓN (vela3) DEBE haber entrado al FVG
+            # REGLA ESPECÍFICA POR TIPO DE FVG (VERIFICACIÓN ESTRICTA):
+            # - FVG BAJISTA: El HIGH de la vela DEBE estar dentro del FVG (fvg_bottom <= HIGH <= fvg_top)
+            # - FVG ALCISTA: El LOW de la vela DEBE estar dentro del FVG (fvg_bottom <= LOW <= fvg_top)
+            # 
+            # IMPORTANTE: Si la vela NO tocó el FVG, NO puede haber una entrada válida
             candle_entered_fvg = False
             
             if calculated_fvg_type == 'BAJISTA':
-                # FVG BAJISTA: El HIGH de la vela en formación debe estar dentro del FVG
+                # FVG BAJISTA: El HIGH de la vela en formación DEBE estar dentro del FVG
+                # Verificación estricta: HIGH debe estar en el rango [fvg_bottom, fvg_top]
                 if fvg_bottom <= candle_high <= fvg_top:
                     candle_entered_fvg = True
-                    self.logger.info(f"[{symbol}] 📍 Vela entró al FVG BAJISTA: HIGH ({candle_high:.5f}) está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})")
+                    self.logger.info(f"[{symbol}] ✅ Vela entró al FVG BAJISTA: HIGH ({candle_high:.5f}) está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})")
                 else:
-                    self.logger.info(
-                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Para FVG BAJISTA, HIGH de vela en formación ({candle_high:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})"
+                    # CRÍTICO: Si el HIGH no está dentro del FVG, la vela NO entró
+                    self.logger.warning(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG BAJISTA, HIGH de vela ({candle_high:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
+                        f"La vela NO entró al FVG - NO SE PUEDE EJECUTAR ORDEN"
                     )
+                    return None
             elif calculated_fvg_type == 'ALCISTA':
-                # FVG ALCISTA: El LOW de la vela en formación debe estar dentro del FVG
+                # FVG ALCISTA: El LOW de la vela en formación DEBE estar dentro del FVG
+                # Verificación estricta: LOW debe estar en el rango [fvg_bottom, fvg_top]
                 if fvg_bottom <= candle_low <= fvg_top:
                     candle_entered_fvg = True
-                    self.logger.info(f"[{symbol}] 📍 Vela entró al FVG ALCISTA: LOW ({candle_low:.5f}) está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})")
+                    self.logger.info(f"[{symbol}] ✅ Vela entró al FVG ALCISTA: LOW ({candle_low:.5f}) está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})")
                 else:
-                    self.logger.info(
-                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Para FVG ALCISTA, LOW de vela en formación ({candle_low:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f})"
+                    # CRÍTICO: Si el LOW no está dentro del FVG, la vela NO entró
+                    self.logger.warning(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG ALCISTA, LOW de vela ({candle_low:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
+                        f"La vela NO entró al FVG - NO SE PUEDE EJECUTAR ORDEN"
                     )
+                    return None
             
+            # Verificación adicional de seguridad (no debería llegar aquí si no entró, pero por si acaso)
             if not candle_entered_fvg:
-                self.logger.info(
-                    f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: La vela EN FORMACIÓN NO entró al FVG {calculated_fvg_type} | "
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO entró al FVG {calculated_fvg_type} | "
                     f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
-                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
+                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | NO SE EJECUTARÁ ORDEN"
                 )
                 return None
             
@@ -909,16 +987,43 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 take_profit = target_price
                 self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Top: {fvg_top:.5f} + FVG Size: {fvg_size:.5f} + Safety Margin: {safety_margin:.5f} + Min Distance: {min_sl_distance:.5f})")
             
-            # Verificar Risk/Reward mínimo
+            # Verificar y ajustar Risk/Reward (mínimo: min_rr, máximo: min_rr)
+            # El TP debe estar limitado para que el RR no exceda el máximo permitido (1:2)
             risk = abs(entry_price - stop_loss)
-            reward = abs(take_profit - entry_price)
             
             if risk == 0:
                 return None
             
-            rr = reward / risk
+            # Calcular RR con el TP del target_price
+            initial_reward = abs(take_profit - entry_price)
+            initial_rr = initial_reward / risk
             
-            self.logger.info(f"[{symbol}] 📈 Calculando RR: Risk={risk:.5f}, Reward={reward:.5f}, RR={rr:.2f} (mínimo requerido: {self.min_rr})")
+            # ⚠️ LIMITAR TP: Si el RR es mayor que el máximo permitido, ajustar TP para que RR = max_rr
+            max_rr = self.min_rr  # RR máximo = RR mínimo (1:2)
+            
+            if initial_rr > max_rr:
+                # Ajustar TP para que el RR sea exactamente el máximo permitido
+                max_reward = risk * max_rr
+                if direction == 'BULLISH':
+                    # Compra: TP debe estar arriba del entry
+                    take_profit = entry_price + max_reward
+                else:
+                    # Venta: TP debe estar debajo del entry
+                    take_profit = entry_price - max_reward
+                
+                reward = max_reward
+                rr = max_rr
+                
+                self.logger.info(
+                    f"[{symbol}] ⚠️  TP ajustado: RR inicial ({initial_rr:.2f}) excedía el máximo permitido ({max_rr:.2f}) | "
+                    f"TP original: {turtle_soup.get('target_price'):.5f} → TP ajustado: {take_profit:.5f} | "
+                    f"RR final: {rr:.2f}"
+                )
+            else:
+                reward = initial_reward
+                rr = initial_rr
+            
+            self.logger.info(f"[{symbol}] 📈 Calculando RR: Risk={risk:.5f}, Reward={reward:.5f}, RR={rr:.2f} (mínimo requerido: {self.min_rr}, máximo: {max_rr})")
             
             if rr < self.min_rr:
                 self.logger.info(f"[{symbol}] ⏸️  Esperando: RR insuficiente ({rr:.2f} < {self.min_rr}). Intentando optimizar SL...")
@@ -927,18 +1032,19 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 if adjusted_sl:
                     new_risk = abs(entry_price - adjusted_sl)
                     new_rr = reward / new_risk
-                    if new_rr >= self.min_rr:
+                    if new_rr >= self.min_rr and new_rr <= max_rr:
                         stop_loss = adjusted_sl
                         rr = new_rr
+                        risk = new_risk
                         self.logger.info(f"[{symbol}] ✅ SL optimizado: Nuevo RR={rr:.2f}")
                     else:
-                        self.logger.info(f"[{symbol}] ⏸️  Esperando: SL optimizado aún no alcanza RR mínimo ({new_rr:.2f} < {self.min_rr})")
+                        self.logger.info(f"[{symbol}] ⏸️  Esperando: SL optimizado no alcanza RR válido (RR={new_rr:.2f}, requiere: {self.min_rr}-{max_rr})")
                         return None
                 else:
                     self.logger.info(f"[{symbol}] ⏸️  Esperando: No se pudo optimizar SL para alcanzar RR mínimo")
                     return None
             else:
-                self.logger.info(f"[{symbol}] ✅ RR válido: {rr:.2f} >= {self.min_rr} - Etapa 3/4 COMPLETA")
+                self.logger.info(f"[{symbol}] ✅ RR válido: {rr:.2f} (dentro del rango {self.min_rr}-{max_rr}) - Etapa 3/4 COMPLETA")
             
             return {
                 'direction': direction,
@@ -1022,19 +1128,6 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             Dict con resultado de la orden
         """
         try:
-            # ⚠️ CONTROL DE DUPLICADOS: Verificar que no se haya ejecutado ya una orden para esta señal de Turtle Soup
-            self._reset_daily_trades_counter()
-            
-            # Crear identificador único para esta señal de Turtle Soup
-            turtle_soup_id = f"{symbol}_{turtle_soup.get('swept_candle', 'unknown')}_{turtle_soup.get('sweep_type', 'unknown')}_{turtle_soup.get('target_price', 0):.5f}"
-            
-            if turtle_soup_id in self.executed_trades_today:
-                self.logger.warning(
-                    f"[{symbol}] ⚠️  ORDEN DUPLICADA DETECTADA: Ya se ejecutó una orden para esta señal de Turtle Soup hoy | "
-                    f"ID: {turtle_soup_id} | Cancelando orden duplicada"
-                )
-                return None
-            
             # ⚠️ VALIDACIÓN CRÍTICA FINAL: Verificar que la VELA EN FORMACIÓN (junto con las 2 anteriores) formen el FVG esperado
             # Esta es la validación final más estricta antes de ejecutar la orden
             self.logger.info(f"[{symbol}] 🔍 Validación final estricta: Verificando vela EN FORMACIÓN + 2 anteriores forman FVG esperado...")
@@ -1129,37 +1222,46 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             current_price = float(tick.bid)
             
             self.logger.info(f"[{symbol}] 📊 Validando vela EN FORMACIÓN: {candle_time.strftime('%Y-%m-%d %H:%M:%S')} | H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | Precio actual: {current_price:.5f}")
+            self.logger.info(f"[{symbol}] 📊 FVG calculado: {calculated_fvg_type} | Bottom: {fvg_bottom:.5f} | Top: {fvg_top:.5f}")
             
-            # VALIDACIÓN FINAL 1: La vela EN FORMACIÓN (vela3) DEBE haber entrado al FVG
+            # ⚠️ VALIDACIÓN CRÍTICA FINAL 1: La vela EN FORMACIÓN (vela3) DEBE haber entrado al FVG
+            # Esta es la validación MÁS ESTRICTA antes de ejecutar - NO SE PUEDE EJECUTAR si la vela NO entró
             # REGLA ESPECÍFICA POR TIPO DE FVG:
-            # - FVG BAJISTA: Usar HIGH de la vela en formación
-            # - FVG ALCISTA: Usar LOW de la vela en formación
+            # - FVG BAJISTA: El HIGH de la vela DEBE estar dentro del FVG [fvg_bottom, fvg_top]
+            # - FVG ALCISTA: El LOW de la vela DEBE estar dentro del FVG [fvg_bottom, fvg_top]
             candle_entered = False
             
             if calculated_fvg_type == 'BAJISTA':
-                # FVG BAJISTA: HIGH debe estar dentro del FVG
+                # FVG BAJISTA: HIGH debe estar dentro del FVG - VERIFICACIÓN ESTRICTA
                 if fvg_bottom <= candle_high <= fvg_top:
                     candle_entered = True
+                    self.logger.info(f"[{symbol}] ✅ VALIDACIÓN: HIGH ({candle_high:.5f}) está dentro del FVG BAJISTA ({fvg_bottom:.5f}-{fvg_top:.5f})")
                 else:
                     self.logger.error(
-                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG BAJISTA, HIGH de vela en formación ({candle_high:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG BAJISTA, HIGH ({candle_high:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
+                        f"Vela: H={candle_high:.5f} L={candle_low:.5f} | "
+                        f"La vela NO entró al FVG - CANCELANDO ORDEN"
                     )
                     return None
             elif calculated_fvg_type == 'ALCISTA':
-                # FVG ALCISTA: LOW debe estar dentro del FVG
+                # FVG ALCISTA: LOW debe estar dentro del FVG - VERIFICACIÓN ESTRICTA
                 if fvg_bottom <= candle_low <= fvg_top:
                     candle_entered = True
+                    self.logger.info(f"[{symbol}] ✅ VALIDACIÓN: LOW ({candle_low:.5f}) está dentro del FVG ALCISTA ({fvg_bottom:.5f}-{fvg_top:.5f})")
                 else:
                     self.logger.error(
-                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG ALCISTA, LOW de vela en formación ({candle_low:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) - Cancelando orden"
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Para FVG ALCISTA, LOW ({candle_low:.5f}) NO está dentro del FVG ({fvg_bottom:.5f}-{fvg_top:.5f}) | "
+                        f"Vela: H={candle_high:.5f} L={candle_low:.5f} | "
+                        f"La vela NO entró al FVG - CANCELANDO ORDEN"
                     )
                     return None
             
+            # Verificación adicional de seguridad (no debería llegar aquí si no entró)
             if not candle_entered:
                 self.logger.error(
                     f"[{symbol}] ❌ VALIDACIÓN FALLIDA: La vela EN FORMACIÓN NO entró al FVG {calculated_fvg_type} | "
                     f"Vela: H={candle_high:.5f} L={candle_low:.5f} C={candle_close:.5f} | "
-                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} - Cancelando orden"
+                    f"FVG: {fvg_bottom:.5f}-{fvg_top:.5f} | CANCELANDO ORDEN - NO SE EJECUTARÁ"
                 )
                 return None
             
@@ -1204,6 +1306,15 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             
             # Verificar límite de trades por día
             if not self._check_daily_trade_limit(symbol):
+                return None
+            
+            # ⚠️ VERIFICACIÓN CRÍTICA FINAL: Verificar posiciones abiertas JUSTO ANTES de ejecutar
+            # Esto previene race conditions donde una posición puede estar abierta entre la verificación anterior y la ejecución
+            if self._has_open_positions(symbol):
+                self.logger.error(
+                    f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Se detectaron posiciones abiertas JUSTO ANTES de ejecutar - "
+                    f"CANCELANDO ORDEN para evitar posición opuesta"
+                )
                 return None
             
             direction = entry_signal['direction']
@@ -1300,10 +1411,6 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 # Incrementar contador de trades del día
                 self.trades_today += 1
                 
-                # Registrar esta señal como ejecutada para evitar duplicados
-                turtle_soup_id = f"{symbol}_{turtle_soup.get('swept_candle', 'unknown')}_{turtle_soup.get('sweep_type', 'unknown')}_{turtle_soup.get('target_price', 0):.5f}"
-                self.executed_trades_today.append(turtle_soup_id)
-                
                 self.logger.info(f"[{symbol}] {'='*70}")
                 self.logger.info(f"[{symbol}] ✅ ORDEN EJECUTADA EXITOSAMENTE")
                 self.logger.info(f"[{symbol}] {'='*70}")
@@ -1315,8 +1422,29 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f}")
                 self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1")
                 self.logger.info(f"[{symbol}] 📊 Trades hoy: {self.trades_today}/{self.max_trades_per_day}")
-                self.logger.info(f"[{symbol}] 🔒 Señal registrada para evitar duplicados: {turtle_soup_id}")
                 self.logger.info(f"[{symbol}] {'='*70}")
+                
+                # Guardar orden en base de datos (método disponible en BaseStrategy)
+                extra_data = {
+                    'turtle_soup': turtle_soup,
+                    'entry_signal': entry_signal,
+                    'trades_today': self.trades_today,
+                    'max_trades_per_day': self.max_trades_per_day
+                }
+                
+                self.save_order_to_db(
+                    ticket=result['order_ticket'],
+                    symbol=symbol,
+                    order_type=direction,  # 'BULLISH' o 'BEARISH' -> convertimos a 'BUY' o 'SELL'
+                    entry_price=entry_price,
+                    volume=volume,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    rr=rr,
+                    comment=f"TurtleSoup H4 + FVG {self.entry_timeframe}",
+                    extra_data=extra_data
+                )
+                
                 return {
                     'action': f'{direction}_EXECUTED',
                     'ticket': result['order_ticket'],

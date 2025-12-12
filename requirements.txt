@@ -4,4 +4,5 @@ pytz>=2023.3
 numpy>=1.24.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+pyodbc>=4.0.39  # Driver para SQL Server (alternativa: pymssql)
 

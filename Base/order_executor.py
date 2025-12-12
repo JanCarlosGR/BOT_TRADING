@@ -527,6 +527,8 @@ class OrderExecutor:
                     'volume': pos.volume,
                     'price_open': pos.price_open,
                     'price_current': pos.price_current,
+                    'price_stop_loss': pos.sl,
+                    'price_take_profit': pos.tp,
                     'profit': pos.profit,
                     'swap': pos.swap,
                     'comment': pos.comment,
@@ -538,6 +540,122 @@ class OrderExecutor:
         except Exception as e:
             self.logger.error(f"Error al obtener posiciones: {e}", exc_info=True)
             return []
+    
+    def modify_position_sl(self, ticket: int, new_stop_loss: float, new_take_profit: Optional[float] = None) -> Dict:
+        """
+        Modifica el stop loss (y opcionalmente take profit) de una posición abierta
+        
+        Args:
+            ticket: Ticket de la posición a modificar
+            new_stop_loss: Nuevo precio de stop loss
+            new_take_profit: Nuevo precio de take profit (opcional, None para mantener el actual)
+            
+        Returns:
+            Dict con resultado de la modificación
+        """
+        try:
+            # Obtener información de la posición
+            positions = mt5.positions_get(ticket=ticket)
+            if positions is None or len(positions) == 0:
+                return {
+                    'success': False,
+                    'message': f'Posición con ticket {ticket} no encontrada',
+                    'error': 'POSITION_NOT_FOUND'
+                }
+            
+            position = positions[0]
+            symbol = position.symbol
+            
+            # Obtener información del símbolo
+            symbol_info = self._get_symbol_info(symbol)
+            if symbol_info is None:
+                return {
+                    'success': False,
+                    'message': f'No se pudo obtener información del símbolo {symbol}',
+                    'error': 'SYMBOL_INFO_ERROR'
+                }
+            
+            # Usar TP actual si no se especifica uno nuevo
+            if new_take_profit is None:
+                new_take_profit = position.tp if position.tp > 0 else 0
+            else:
+                # Validar y ajustar TP
+                new_take_profit, _ = self._validate_and_adjust_stops(
+                    symbol=symbol,
+                    order_type=OrderType.BUY if position.type == mt5.ORDER_TYPE_BUY else OrderType.SELL,
+                    entry_price=position.price_open,
+                    stop_loss=new_stop_loss,
+                    take_profit=new_take_profit
+                )
+                if new_take_profit is None:
+                    new_take_profit = position.tp if position.tp > 0 else 0
+            
+            # Validar y ajustar SL
+            adjusted_sl, _ = self._validate_and_adjust_stops(
+                symbol=symbol,
+                order_type=OrderType.BUY if position.type == mt5.ORDER_TYPE_BUY else OrderType.SELL,
+                entry_price=position.price_open,
+                stop_loss=new_stop_loss,
+                take_profit=new_take_profit
+            )
+            
+            if adjusted_sl is None:
+                return {
+                    'success': False,
+                    'message': f'Stop loss {new_stop_loss} inválido para posición {ticket}',
+                    'error': 'INVALID_STOP_LOSS'
+                }
+            
+            # Normalizar precios
+            adjusted_sl = self._normalize_price(symbol, adjusted_sl)
+            new_take_profit = self._normalize_price(symbol, new_take_profit) if new_take_profit > 0 else 0
+            
+            # Crear solicitud de modificación
+            request = {
+                'action': mt5.TRADE_ACTION_SLTP,
+                'symbol': symbol,
+                'position': ticket,
+                'sl': adjusted_sl,
+                'tp': new_take_profit if new_take_profit > 0 else None,
+            }
+            
+            # Enviar solicitud
+            result = mt5.order_send(request)
+            
+            if result is None:
+                error_code = mt5.last_error()[0]
+                error_msg = mt5.last_error()[1]
+                self.logger.error(f"Error al modificar posición {ticket}: {error_code} - {error_msg}")
+                return {
+                    'success': False,
+                    'message': error_msg,
+                    'error': f'MT5_ERROR_{error_code}'
+                }
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                self.logger.warning(f"Posición {ticket} no modificada: {result.retcode} - {result.comment}")
+                return {
+                    'success': False,
+                    'message': result.comment,
+                    'error': f'MT5_RETCODE_{result.retcode}'
+                }
+            
+            self.logger.info(f"✅ Posición {ticket} modificada - SL: {adjusted_sl:.5f}, TP: {new_take_profit:.5f}")
+            return {
+                'success': True,
+                'ticket': ticket,
+                'stop_loss': adjusted_sl,
+                'take_profit': new_take_profit,
+                'message': 'Stop loss modificado exitosamente'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error al modificar posición {ticket}: {e}", exc_info=True)
+            return {
+                'success': False,
+                'message': str(e),
+                'error': 'EXCEPTION'
+            }
 
 
 # Función global para facilitar el uso

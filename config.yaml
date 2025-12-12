@@ -40,6 +40,28 @@ risk_management:
   max_position_size: 10.0      # Tamaño máximo de posición (lots) - límite de seguridad (solo referencia, no restrictivo)
   stop_loss_pips: 50           # Stop loss en pips (legacy, no se usa si se calcula por riesgo)
   take_profit_pips: 100        # Take profit en pips (legacy, no se usa si se calcula por riesgo)
+  close_day_on_first_tp: true  # Si la primera entrada cierra con TP, cerrar el día operativo (no colocar más órdenes hasta próxima sesión)
+
+# Configuración de monitoreo de posiciones
+position_monitoring:
+  enabled: true  # Habilitar monitoreo automático de posiciones
+  trailing_stop:
+    enabled: true  # Habilitar trailing stop loss
+    trigger_percent: 0.70  # Porcentaje del movimiento para activar trailing (0.70 = 70%)
+    sl_percent: 0.50  # Porcentaje donde mover el SL cuando se activa (0.50 = 50%)
+  auto_close:
+    enabled: true  # Habilitar cierre automático
+    time: "16:50"  # Hora de cierre automático (formato HH:MM) - 4:50 PM hora de Nueva York
+    timezone: "America/New_York"  # Zona horaria para el cierre automático
+
+# Configuración de base de datos
+database:
+  enabled: true  # Habilitar guardado en base de datos
+  server: "18.224.8.184"
+  database: "DbBotTrading"
+  username: "csenterprise"
+  password: "Med@s0ft7622"
+  driver: "ODBC Driver 17 for SQL Server"  # Driver ODBC para SQL Server (ajustar según sistema)
 
 # Configuración general
 general:

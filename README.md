@@ -10,13 +10,15 @@ Bot de trading automatizado con soporte multi-estrategia, gestión de horarios o
 - ✅ Sistema multi-estrategia (fácil agregar nuevas estrategias)
 - ✅ Gestión de horarios operativos (timezone configurable)
 - ✅ Soporte para múltiples activos (EURUSD, GBPUSD, etc.)
-- ✅ Sistema de logging completo
+- ✅ Sistema de logging completo (archivo + base de datos SQL Server)
 - ✅ Configuración mediante archivo YAML
 - ✅ **Módulos reutilizables en `Base/`**:
   - 📊 Lector de velas (`candle_reader.py`)
   - 📈 Detector de FVG - Fair Value Gap (`fvg_detector.py`)
   - 📰 Verificador de noticias económicas (`news_checker.py`)
-  - 💹 Ejecutor de órdenes MT5 (`order_executor.py`) - **NUEVO**
+  - 💹 Ejecutor de órdenes MT5 (`order_executor.py`)
+  - 💾 Sistema de base de datos SQL Server (`database.py`) - **NUEVO**
+  - 📝 Handler de logging en BD (`db_log_handler.py`) - **NUEVO**
 
 ## Instalación
 
@@ -325,9 +327,10 @@ class EstrategiaCompleta(BaseStrategy):
 
 ## Logs
 
-Los logs se guardan en:
+Los logs se guardan en múltiples ubicaciones:
 - **Archivo**: `logs/trading_bot.log` (carpeta `logs/`)
 - **Consola**: Salida estándar
+- **Base de Datos**: Tabla `Logs` en SQL Server (si está configurado)
 
 Niveles de log configurables en `config.yaml`:
 - DEBUG: Información detallada
@@ -335,9 +338,17 @@ Niveles de log configurables en `config.yaml`:
 - WARNING: Solo advertencias y errores
 - ERROR: Solo errores
 
+**Características del logging en BD:**
+- ✅ Guardado automático de todos los logs (INFO y superior)
+- ✅ Extracción automática de símbolo y estrategia
+- ✅ Soporte para datos adicionales (JSON)
+- ✅ Historial completo y consultable vía SQL
+
 **Nota**: La carpeta `logs/` se crea automáticamente. Los archivos `.log` están en `.gitignore`.
 
-**Ver documentación:** [logs/README.md](logs/README.md)
+**Ver documentación:**
+- Archivos de log: [logs/README.md](logs/README.md)
+- Logging en BD: [Base/Documentation/DATABASE_LOGGING_DOCS.md](Base/Documentation/DATABASE_LOGGING_DOCS.md)
 
 ## Notas Importantes
 

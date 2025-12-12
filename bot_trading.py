@@ -5,7 +5,7 @@ Sistema multi-estrategia con gestión de horarios operativos
 
 import yaml
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import List, Dict, Optional
 import MetaTrader5 as mt5
 from pytz import timezone
@@ -13,6 +13,9 @@ import time as time_module
 
 from strategy_manager import StrategyManager
 from Base.trading_hours import TradingHoursManager
+from Base.position_monitor import PositionMonitor
+from Base.database import DatabaseManager
+from Base.db_log_handler import DatabaseLogHandler
 
 
 class TradingBot:
@@ -33,6 +36,11 @@ class TradingBot:
         self.mt5_connected = False
         self.strategy_manager = StrategyManager(self.config)
         self.trading_hours = TradingHoursManager(self.config['trading_hours'])
+        self.position_monitor = PositionMonitor(self.config)
+        
+        # Inicializar base de datos y configurar handler de logging
+        self.db_manager = DatabaseManager(self.config)
+        self._setup_database_logging()
         
         # Conectar a MT5
         self._connect_mt5()
@@ -67,6 +75,26 @@ class TradingBot:
             ]
         )
         self.logger = logging.getLogger(__name__)
+    
+    def _setup_database_logging(self):
+        """Configura el handler de logging para base de datos"""
+        try:
+            if self.db_manager.enabled:
+                # Crear handler personalizado para BD
+                db_handler = DatabaseLogHandler(
+                    db_manager=self.db_manager,
+                    min_level=logging.INFO  # Solo guardar INFO y superiores
+                )
+                
+                # Agregar handler al root logger para que capture todos los logs
+                root_logger = logging.getLogger()
+                root_logger.addHandler(db_handler)
+                
+                self.logger.info("✅ Handler de logging para base de datos configurado")
+            else:
+                self.logger.debug("Base de datos deshabilitada - Logs no se guardarán en BD")
+        except Exception as e:
+            self.logger.warning(f"No se pudo configurar handler de BD: {e}")
     
     def _connect_mt5(self) -> bool:
         """Conecta al terminal MT5"""
@@ -196,6 +224,155 @@ class TradingBot:
             except Exception as e:
                 self.logger.error(f"Error al analizar {symbol}: {e}", exc_info=True)
     
+    def _monitor_positions(self) -> Dict:
+        """
+        Monitorea posiciones abiertas y aplica reglas de gestión:
+        - Trailing stop loss (70% -> mover SL a 50%)
+        - Cierre automático a las 4:50 PM NY
+        
+        Returns:
+            Dict con información de posiciones abiertas
+        """
+        try:
+            result = self.position_monitor.monitor_positions()
+            
+            if not result['success']:
+                self.logger.warning(f"Error en monitoreo de posiciones: {result.get('message', 'Unknown')}")
+                return {'success': False, 'open_count': 0}
+            
+            actions = result.get('actions', [])
+            if actions:
+                for action in actions:
+                    if action['action'] == 'trailing_stop':
+                        self.logger.info(
+                            f"📈 Trailing Stop aplicado - {action['symbol']} | "
+                            f"Ticket: {action['ticket']} | "
+                            f"SL: {action['old_sl']:.5f} → {action['new_sl']:.5f} | "
+                            f"Progreso: {action['progress_percent']:.1%}"
+                        )
+                    elif action['action'] == 'auto_close':
+                        self.logger.info(
+                            f"🕐 Cierre automático - {action['closed_count']} posición(es) cerrada(s)"
+                        )
+                        for pos in action.get('closed_positions', []):
+                            self.logger.info(f"  ✅ {pos['symbol']} - Ticket: {pos['ticket']}")
+            
+            # Obtener conteo de posiciones abiertas para retornar
+            try:
+                positions = self.position_monitor.executor.get_positions()
+                result['open_count'] = len(positions) if positions else 0
+            except:
+                result['open_count'] = 0
+            
+            return result
+                        
+        except Exception as e:
+            self.logger.error(f"Error en monitoreo de posiciones: {e}", exc_info=True)
+            return {'success': False, 'open_count': 0}
+    
+    def _has_open_positions(self) -> bool:
+        """
+        Verifica si hay posiciones abiertas (rápido, sin loguear)
+        
+        Returns:
+            True si hay posiciones abiertas, False si no hay
+        """
+        try:
+            if not self.mt5_connected:
+                return False
+            
+            positions = mt5.positions_get()
+            if positions is None:
+                return False
+            
+            has_pos = len(positions) > 0
+            
+            # Log de diagnóstico ocasional (cada 60 segundos máximo)
+            if has_pos:
+                if not hasattr(self, '_last_position_check_log'):
+                    self._last_position_check_log = 0
+                if (time_module.time() - self._last_position_check_log) >= 60:
+                    self.logger.debug(f"✅ Detectadas {len(positions)} posición(es) abierta(s) en MT5")
+                    self._last_position_check_log = time_module.time()
+            
+            return has_pos
+        except Exception as e:
+            self.logger.error(f"Error al verificar posiciones abiertas: {e}", exc_info=True)
+            return False
+    
+    def _has_open_orders_in_db(self) -> bool:
+        """
+        Verifica si hay órdenes abiertas en la base de datos (fuente de verdad)
+        
+        Returns:
+            True si hay órdenes abiertas en BD, False si no hay
+        """
+        try:
+            if not self.db_manager.enabled:
+                self.logger.debug("BD no habilitada - no se puede verificar órdenes abiertas")
+                return False
+            
+            open_orders = self.db_manager.get_open_orders()
+            has_orders = len(open_orders) > 0
+            
+            # Log de diagnóstico: mostrar qué órdenes se encontraron
+            if has_orders:
+                if not hasattr(self, '_db_orders_detected_logged'):
+                    self.logger.warning(f"🚨 ⚠️  SE DETECTARON {len(open_orders)} ORDEN(ES) CON Status='OPEN' EN BASE DE DATOS")
+                    for order in open_orders:
+                        self.logger.warning(
+                            f"   🎫 Ticket: {order.get('ticket')}, "
+                            f"Symbol: {order.get('symbol')}, "
+                            f"Tipo: {order.get('order_type')}, "
+                            f"Status: '{order.get('status', 'OPEN')}'"
+                        )
+                    self._db_orders_detected_logged = True
+            else:
+                # Si no hay órdenes abiertas, verificar si hay órdenes cerradas (para diagnóstico)
+                if not hasattr(self, '_db_closed_orders_checked'):
+                    try:
+                        # Consultar todas las órdenes de hoy para diagnóstico
+                        cursor = self.db_manager.connection.cursor()
+                        today = datetime.now().date()
+                        query = "SELECT COUNT(*) FROM Orders WHERE CAST(CreatedAt AS DATE) = ?"
+                        cursor.execute(query, (today,))
+                        total_today = cursor.fetchone()[0]
+                        cursor.close()
+                        
+                        if total_today > 0:
+                            self.logger.info(f"📊 Diagnóstico: Hay {total_today} orden(es) en BD hoy, pero todas están cerradas (Status='CLOSED')")
+                        self._db_closed_orders_checked = True
+                    except:
+                        pass
+            
+            # Log siempre cuando hay órdenes (para diagnóstico - cada 10 segundos)
+            if has_orders:
+                if not hasattr(self, '_last_db_order_check_log'):
+                    self._last_db_order_check_log = 0
+                # Log cada 10 segundos cuando hay órdenes (más frecuente para diagnóstico)
+                if (time_module.time() - self._last_db_order_check_log) >= 10:
+                    self.logger.info(f"📊 ⚠️  DETECTADAS {len(open_orders)} ORDEN(ES) ABIERTA(S) EN BASE DE DATOS")
+                    for order in open_orders:
+                        self.logger.info(
+                            f"   • Ticket: {order.get('ticket')}, "
+                            f"Symbol: {order.get('symbol')}, "
+                            f"Tipo: {order.get('order_type')}, "
+                            f"Status: {order.get('status', 'OPEN')}"
+                        )
+                    self._last_db_order_check_log = time_module.time()
+            else:
+                # Log ocasional cuando NO hay órdenes (cada 60 segundos)
+                if not hasattr(self, '_last_db_order_check_log_empty'):
+                    self._last_db_order_check_log_empty = 0
+                if (time_module.time() - self._last_db_order_check_log_empty) >= 60:
+                    self.logger.debug("📊 No hay órdenes abiertas en BD")
+                    self._last_db_order_check_log_empty = time_module.time()
+            
+            return has_orders
+        except Exception as e:
+            self.logger.error(f"❌ Error al verificar órdenes abiertas en BD: {e}", exc_info=True)
+            return False
+    
     def _parse_timeframe(self, tf_str: str) -> int:
         """Convierte string de timeframe a constante MT5"""
         timeframe_map = {
@@ -217,6 +394,19 @@ class TradingBot:
         self.logger.info(f"Activos: {', '.join(self.config['symbols'])}")
         self.logger.info(f"Horario operativo: {self.config['trading_hours']['start_time']} - {self.config['trading_hours']['end_time']} ({self.config['trading_hours']['timezone']})")
         self.logger.info(f"Estrategia: {self.config['strategy']['name']}")
+        
+        # Verificar si el día actual es operativo
+        is_trading_day, day_reason, holidays = self.trading_hours.is_trading_day()
+        if is_trading_day:
+            self.logger.info(f"📅 Día operativo: {day_reason}")
+        else:
+            self.logger.warning(f"🚫 {day_reason}")
+            if holidays:
+                holiday_names = [h.get('title', 'Holiday') for h in holidays]
+                self.logger.warning(f"   Feriados detectados: {', '.join(holiday_names)}")
+            next_trading = self.trading_hours.get_next_trading_time()
+            self.logger.info(f"   Próximo día operativo: {next_trading.strftime('%Y-%m-%d %H:%M')}")
+        
         self.logger.info("=" * 50)
         
         if not self.mt5_connected:
@@ -227,35 +417,177 @@ class TradingBot:
             while True:
                 current_time = datetime.now()
                 
-                # Verificar si estamos en horario operativo
-                if self._is_trading_time():
-                    # Verificar ANTES de analizar si la estrategia necesita monitoreo intensivo
-                    strategy_name = self.config['strategy']['name']
-                    needs_intensive = self.strategy_manager.needs_intensive_monitoring(strategy_name)
+                # PRIMERO: Verificar si hay órdenes abiertas ANTES de cualquier análisis o monitoreo
+                # Verificar posiciones abiertas desde MT5 Y desde BD (fuente de verdad)
+                has_mt5_positions = self._has_open_positions()
+                has_db_orders = self._has_open_orders_in_db()
+                has_open_positions = has_mt5_positions or has_db_orders
+                
+                # Monitorear posiciones abiertas (siempre, independiente del horario operativo)
+                monitor_result = self._monitor_positions()
+                
+                # Log de diagnóstico cada ciclo cuando hay órdenes en BD
+                if has_db_orders:
+                    self.logger.warning(
+                        f"🚨 DEBUG: has_db_orders={has_db_orders}, "
+                        f"has_mt5_positions={has_mt5_positions}, "
+                        f"has_open_positions={has_open_positions}"
+                    )
+                
+                # Log de diagnóstico cuando hay órdenes en BD pero no en MT5
+                if has_db_orders and not has_mt5_positions:
+                    if not hasattr(self, '_last_sync_warning_log'):
+                        self._last_sync_warning_log = 0
+                    if (time_module.time() - self._last_sync_warning_log) >= 30:
+                        self.logger.warning(
+                            "⚠️  Hay órdenes abiertas en BD pero no en MT5 - "
+                            "Sincronizando automáticamente..."
+                        )
+                        # Forzar sincronización
+                        if self.db_manager.enabled:
+                            mt5_positions = []
+                            try:
+                                if self.mt5_connected:
+                                    from Base.order_executor import OrderExecutor
+                                    executor = OrderExecutor()
+                                    mt5_positions = executor.get_positions()
+                            except Exception as e:
+                                self.logger.error(f"Error al obtener posiciones MT5 para sincronización: {e}")
+                            self.db_manager.sync_orders_with_mt5(mt5_positions)
+                        self._last_sync_warning_log = time_module.time()
+                
+                # Si hay posiciones abiertas, priorizar monitoreo sobre análisis
+                if has_open_positions:
+                    # Log inmediato cuando detecta posiciones abiertas (cada 5 segundos)
+                    if not hasattr(self, '_last_position_detected_log'):
+                        self._last_position_detected_log = 0
+                    if (time_module.time() - self._last_position_detected_log) >= 5:
+                        self.logger.warning(
+                            f"🛑 POSICIONES ABIERTAS DETECTADAS - "
+                            f"MT5: {has_mt5_positions}, BD: {has_db_orders} - "
+                            f"PRIORIZANDO MONITOREO - NO ANALIZANDO"
+                        )
+                        self._last_position_detected_log = time_module.time()
+                    # Monitoreo activo: verificar cada 5 segundos (más frecuente)
+                    open_count_mt5 = monitor_result.get('open_count', 0) if isinstance(monitor_result, dict) else 0
                     
-                    if needs_intensive:
-                        # Modo monitoreo intensivo: analizar cada segundo
-                        self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo - Analizando cada segundo...")
-                        self._analyze_market()
-                        sleep_interval = 1
-                    else:
-                        # Modo normal: analizar y esperar intervalo normal
-                        self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Horario operativo activo - Analizando mercado...")
-                        self._analyze_market()
-                        
-                        # Verificar DESPUÉS de analizar si se activó monitoreo intensivo
-                        if self.strategy_manager.needs_intensive_monitoring(strategy_name):
-                            # Si se activó durante el análisis, usar intervalo corto
-                            sleep_interval = 1
-                            self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Monitoreo intensivo activado - Cambiando a intervalo de 1 segundo")
-                        else:
-                            # Modo normal: usar intervalo configurado
-                            sleep_interval = 60
+                    # Obtener conteo desde BD también
+                    open_count_db = 0
+                    if self.db_manager.enabled:
+                        db_orders = self.db_manager.get_open_orders()
+                        open_count_db = len(db_orders) if db_orders else 0
+                    
+                    # Mostrar mensaje de monitoreo cada 30 segundos para no saturar logs
+                    if not hasattr(self, '_last_monitor_log'):
+                        self._last_monitor_log = 0
+                    
+                    if (time_module.time() - self._last_monitor_log) >= 30:
+                        total_count = max(open_count_mt5, open_count_db)  # Usar el mayor
+                        self.logger.info(
+                            f"🔄 Monitoreando {total_count} posición(es) abierta(s) "
+                            f"(MT5: {open_count_mt5}, BD: {open_count_db}) - "
+                            f"Priorizando monitoreo sobre análisis"
+                        )
+                        self._last_monitor_log = time_module.time()
+                    
+                    sleep_interval = 5  # Monitoreo más frecuente cuando hay posiciones
+                    
+                    # NO analizar mercado cuando hay posiciones abiertas (solo monitorear)
+                    # El análisis se reanudará cuando se cierren todas las posiciones
+                    if hasattr(self, '_last_analysis_with_positions'):
+                        self._last_analysis_with_positions = time_module.time()
+                    
+                    # Saltar completamente el bloque de análisis - continuar al sleep (sleep_interval ya está configurado arriba)
                 else:
-                    next_trading = self.trading_hours.get_next_trading_time()
-                    time_until = self.trading_hours.get_time_until_trading()
-                    self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ⏸️  Fuera de horario operativo - Próximo horario: {next_trading.strftime('%H:%M')} ({time_until})")
-                    sleep_interval = 60
+                    # SOLO si NO hay posiciones abiertas: verificar si se debe cerrar el día operativo
+                    # Verificar si se alcanzó el límite diario o si el primer TP cerró el día
+                    strategy_name = self.config['strategy']['name']
+                    strategy = self.strategy_manager.strategies.get(strategy_name)
+                    
+                    should_close_day = False
+                    close_reason = ""
+                    
+                    if strategy:
+                        # Verificar límite diario de trades desde BD
+                        db_manager = strategy._get_db_manager()
+                        if db_manager and db_manager.enabled:
+                            for symbol in self.config.get('symbols', []):
+                                # Verificar conteo de trades hoy
+                                trades_today = db_manager.count_trades_today(strategy=strategy_name, symbol=symbol)
+                                max_trades = strategy.max_trades_per_day
+                                
+                                if trades_today >= max_trades:
+                                    should_close_day = True
+                                    close_reason = f"Límite diario alcanzado ({trades_today}/{max_trades} trades)"
+                                    break
+                        
+                        # Verificar si el primer TP cerró el día (solo si no se alcanzó el límite)
+                        if not should_close_day and hasattr(strategy, '_check_first_trade_tp_closure'):
+                            for symbol in self.config.get('symbols', []):
+                                if strategy._check_first_trade_tp_closure(symbol):
+                                    should_close_day = True
+                                    close_reason = "Primer trade cerró con TP"
+                                    break
+                    
+                    # Si se debe cerrar el día, NO analizar mercado
+                    if should_close_day:
+                        if not hasattr(self, '_last_day_closed_log'):
+                            self._last_day_closed_log = 0
+                        if (time_module.time() - self._last_day_closed_log) >= 300:  # Cada 5 minutos
+                            self.logger.info(
+                                f"⏸️  DÍA OPERATIVO CERRADO - {close_reason} - "
+                                f"No se realizarán más operaciones hasta el próximo día operativo"
+                            )
+                            self._last_day_closed_log = time_module.time()
+                        sleep_interval = 60  # Esperar 1 minuto antes de verificar de nuevo
+                    elif self._is_trading_time():
+                        # Solo analizar si estamos en horario operativo Y no se debe cerrar el día
+                        # Verificar ANTES de analizar si la estrategia necesita monitoreo intensivo
+                        needs_intensive = self.strategy_manager.needs_intensive_monitoring(strategy_name)
+                        
+                        if needs_intensive:
+                            # Modo monitoreo intensivo: analizar cada segundo
+                            self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo - Analizando cada segundo...")
+                            self._analyze_market()
+                            sleep_interval = 1
+                        else:
+                            # Modo normal: analizar y esperar intervalo normal
+                            self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Horario operativo activo - Analizando mercado...")
+                            self._analyze_market()
+                            
+                            # Verificar DESPUÉS de analizar si se activó monitoreo intensivo
+                            if self.strategy_manager.needs_intensive_monitoring(strategy_name):
+                                # Si se activó durante el análisis, usar intervalo corto
+                                sleep_interval = 1
+                                self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Monitoreo intensivo activado - Cambiando a intervalo de 1 segundo")
+                            else:
+                                # Modo normal: usar intervalo configurado
+                                sleep_interval = 60
+                    else:
+                        # Fuera de horario operativo - verificar si es por día no operativo o por hora
+                        is_trading_day, day_reason, holidays = self.trading_hours.is_trading_day()
+                        
+                        if not is_trading_day:
+                            # No es día operativo (fin de semana o feriado)
+                            next_trading = self.trading_hours.get_next_trading_time()
+                            time_until = self.trading_hours.get_time_until_trading()
+                            self.logger.info(
+                                f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🚫 {day_reason} - "
+                                f"Próximo día operativo: {next_trading.strftime('%Y-%m-%d %H:%M')} ({time_until})"
+                            )
+                        else:
+                            # Es día operativo pero fuera de horario
+                            next_trading = self.trading_hours.get_next_trading_time()
+                            time_until = self.trading_hours.get_time_until_trading()
+                            self.logger.info(
+                                f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ⏸️  Fuera de horario operativo - "
+                                f"Próximo horario: {next_trading.strftime('%H:%M')} ({time_until})"
+                            )
+                        sleep_interval = 60
+                    
+                    # Resetear contador cuando no hay posiciones
+                    if hasattr(self, '_last_analysis_with_positions'):
+                        self._last_analysis_with_positions = 0
                 
                 # Esperar antes de la siguiente iteración
                 time_module.sleep(sleep_interval)
@@ -273,6 +605,8 @@ class TradingBot:
         if self.mt5_connected:
             mt5.shutdown()
             self.mt5_connected = False
+        if self.db_manager:
+            self.db_manager.close()
         self.logger.info("Bot finalizado correctamente")
 
 
