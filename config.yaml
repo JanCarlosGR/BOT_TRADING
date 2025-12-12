@@ -35,9 +35,9 @@ strategy_config:
 
 # Configuración de riesgo
 risk_management:
-  risk_per_trade_percent: 1.0  # Porcentaje de riesgo por trade (ej: 1.0 = 1% de la cuenta)
+  risk_per_trade_percent: 1.0  # Porcentaje de riesgo por trade (ej: 1.0 = 1% de la cuenta) - IMPORTANTE: El volumen se calcula automáticamente basado en este %
   max_trades_per_day: 2        # Máximo de trades por día
-  max_position_size: 0.1       # Tamaño máximo de posición (lots) - límite de seguridad
+  max_position_size: 10.0      # Tamaño máximo de posición (lots) - límite de seguridad (solo referencia, no restrictivo)
   stop_loss_pips: 50           # Stop loss en pips (legacy, no se usa si se calcula por riesgo)
   take_profit_pips: 100        # Take profit en pips (legacy, no se usa si se calcula por riesgo)
 

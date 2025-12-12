@@ -481,10 +481,16 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 volume = volume_max
                 self.logger.warning(f"[{symbol}] ⚠️  Volumen calculado excede el máximo del símbolo ({volume_max}), usando máximo")
             
-            # Aplicar límite de seguridad de la configuración
+            # Aplicar límite de seguridad de la configuración (solo como advertencia, no como límite restrictivo)
+            # El volumen se calcula basado en el 1% de riesgo, por lo que no debe limitarse arbitrariamente
             if volume > self.max_position_size:
-                volume = self.max_position_size
-                self.logger.warning(f"[{symbol}] ⚠️  Volumen calculado excede el límite máximo de configuración ({self.max_position_size}), usando límite")
+                # Si el volumen calculado es mayor al límite, loguear advertencia pero permitir el volumen calculado
+                # El límite max_position_size es solo una referencia de seguridad, no un límite absoluto
+                self.logger.info(
+                    f"[{symbol}] ℹ️  Volumen calculado ({volume:.2f}) es mayor al límite de referencia ({self.max_position_size}), "
+                    f"pero se usa el volumen calculado para respetar el {self.risk_per_trade_percent}% de riesgo configurado"
+                )
+                # NO limitar el volumen - usar el calculado para respetar el % de riesgo
             
             # Verificar que el volumen final sea válido
             if volume < volume_min:
@@ -824,14 +830,10 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             
             self.logger.info(f"[{symbol}] ✅ Condiciones cumplidas - Listo para calcular entrada")
             
-            # Obtener precio actual
-            current_candle = get_candle(self.entry_timeframe, 'ahora', symbol)
-            if not current_candle:
+            # Obtener precio actual (bid para venta, ask para compra)
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
                 return None
-            
-            current_price = current_candle.get('close')
-            if current_price is None:
-                current_price = (current_candle.get('high', 0) + current_candle.get('low', 0)) / 2
             
             # Calcular niveles
             fvg_top = fvg.get('fvg_top')
@@ -843,24 +845,69 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             
             # Calcular Stop Loss (debe cubrir todo el FVG + margen adicional para retrocesos)
             fvg_size = fvg_top - fvg_bottom
+            
+            # Obtener información del símbolo para calcular spread y distancia mínima
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                return None
+            
+            spread_points = symbol_info.spread  # Spread en puntos
+            point = symbol_info.point  # Valor de un punto
+            spread_price = spread_points * point  # Spread en precio
+            
             # Usar 50% del tamaño del FVG como margen adicional para proteger contra retrocesos
             # Esto asegura que si el precio retrocede y completa el FVG, el SL no se active
             safety_margin = fvg_size * 0.5  # 50% adicional más allá del FVG
             
+            # Distancia mínima del SL: spread + margen de seguridad (mínimo 10 pips o 3x el spread, el que sea mayor)
+            min_sl_distance = max(
+                spread_price * 3,  # 3x el spread como mínimo
+                point * 10,  # Mínimo 10 pips
+                fvg_size * 1.5  # O 1.5x el tamaño del FVG
+            )
+            
+            # ⚡ ORDEN A MERCADO: Usar precio actual del mercado (bid/ask)
+            # Para órdenes a mercado, el precio de entrada es el precio actual del mercado
+            # La optimización viene de entrar cuando el precio ya salió del FVG (mejor momento)
+            
             if direction == 'BULLISH':
-                # Compra: SL debajo del FVG con margen adicional
-                # SL = Bottom del FVG - tamaño del FVG - margen adicional
-                stop_loss = fvg_bottom - fvg_size - safety_margin
-                entry_price = current_price
+                # Compra: Orden a mercado se ejecuta al precio ASK actual
+                entry_price = float(tick.ask)
+                self.logger.info(f"[{symbol}] 💹 Entrada a mercado (BUY): Precio ASK actual = {entry_price:.5f}")
+                
+                # SL debajo del FVG con margen adicional
+                calculated_sl = fvg_bottom - fvg_size - safety_margin
+                
+                # Asegurar distancia mínima del SL desde el precio de entrada
+                # El SL debe estar al menos a min_sl_distance del precio de entrada
+                min_sl_price = entry_price - min_sl_distance
+                stop_loss = min(calculated_sl, min_sl_price)
+                
+                # Si tuvimos que ajustar el SL, loguearlo
+                if stop_loss < calculated_sl:
+                    self.logger.info(f"[{symbol}] ⚠️  SL ajustado por distancia mínima: {calculated_sl:.5f} → {stop_loss:.5f} (mínimo requerido: {min_sl_price:.5f})")
+                
                 take_profit = target_price
-                self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Bottom: {fvg_bottom:.5f} - FVG Size: {fvg_size:.5f} - Safety Margin: {safety_margin:.5f})")
+                self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Bottom: {fvg_bottom:.5f} - FVG Size: {fvg_size:.5f} - Safety Margin: {safety_margin:.5f} - Min Distance: {min_sl_distance:.5f})")
             else:
-                # Venta: SL arriba del FVG con margen adicional
-                # SL = Top del FVG + tamaño del FVG + margen adicional
-                stop_loss = fvg_top + fvg_size + safety_margin
-                entry_price = current_price
+                # Venta: Orden a mercado se ejecuta al precio BID actual
+                entry_price = float(tick.bid)
+                self.logger.info(f"[{symbol}] 💹 Entrada a mercado (SELL): Precio BID actual = {entry_price:.5f}")
+                
+                # SL arriba del FVG con margen adicional
+                calculated_sl = fvg_top + fvg_size + safety_margin
+                
+                # Asegurar distancia mínima del SL desde el precio de entrada
+                # El SL debe estar al menos a min_sl_distance del precio de entrada
+                min_sl_price = entry_price + min_sl_distance
+                stop_loss = max(calculated_sl, min_sl_price)
+                
+                # Si tuvimos que ajustar el SL, loguearlo
+                if stop_loss > calculated_sl:
+                    self.logger.info(f"[{symbol}] ⚠️  SL ajustado por distancia mínima: {calculated_sl:.5f} → {stop_loss:.5f} (mínimo requerido: {min_sl_price:.5f})")
+                
                 take_profit = target_price
-                self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Top: {fvg_top:.5f} + FVG Size: {fvg_size:.5f} + Safety Margin: {safety_margin:.5f})")
+                self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Top: {fvg_top:.5f} + FVG Size: {fvg_size:.5f} + Safety Margin: {safety_margin:.5f} + Min Distance: {min_sl_distance:.5f})")
             
             # Verificar Risk/Reward mínimo
             risk = abs(entry_price - stop_loss)
@@ -1160,10 +1207,31 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 return None
             
             direction = entry_signal['direction']
-            entry_price = entry_signal['entry_price']
             stop_loss = entry_signal['stop_loss']
             take_profit = entry_signal['take_profit']
             rr = entry_signal['rr']
+            
+            # ⚡ OBTENER PRECIO ACTUAL DEL MERCADO EN ESTE MOMENTO EXACTO
+            # Las condiciones se cumplieron, ahora obtenemos el precio actual para ejecutar orden a mercado
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                self.logger.error(f"[{symbol}] ❌ No se pudo obtener precio actual del mercado - Cancelando orden")
+                return None
+            
+            # Precio de entrada = precio actual del mercado (bid para venta, ask para compra)
+            if direction == 'BULLISH':
+                entry_price = float(tick.ask)  # Compra: precio ASK
+                self.logger.info(f"[{symbol}] 💹 Precio de entrada a mercado (BUY): {entry_price:.5f} (ASK actual)")
+            else:
+                entry_price = float(tick.bid)  # Venta: precio BID
+                self.logger.info(f"[{symbol}] 💹 Precio de entrada a mercado (SELL): {entry_price:.5f} (BID actual)")
+            
+            # Recalcular RR con el precio real de entrada
+            risk = abs(entry_price - stop_loss)
+            reward = abs(take_profit - entry_price)
+            if risk > 0:
+                rr = reward / risk
+                self.logger.info(f"[{symbol}] 📈 RR recalculado con precio real: Risk={risk:.5f}, Reward={reward:.5f}, RR={rr:.2f}")
             
             # Crear diccionario FVG con la información calculada y validada
             fvg = {
