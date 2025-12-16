@@ -1337,12 +1337,27 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 entry_price = float(tick.bid)  # Venta: precio BID
                 self.logger.info(f"[{symbol}] 💹 Precio de entrada a mercado (SELL): {entry_price:.5f} (BID actual)")
             
-            # Recalcular RR con el precio real de entrada
+            # Recalcular RIESGO con el precio real de entrada
             risk = abs(entry_price - stop_loss)
-            reward = abs(take_profit - entry_price)
-            if risk > 0:
-                rr = reward / risk
-                self.logger.info(f"[{symbol}] 📈 RR recalculado con precio real: Risk={risk:.5f}, Reward={reward:.5f}, RR={rr:.2f}")
+            if risk <= 0:
+                self.logger.error(f"[{symbol}] ❌ Risk calculado 0 o negativo después de ajustar entry_price - Cancelando orden")
+                return None
+            
+            # ⚠️ FORZAR RR EXACTO 1:2 CON EL PRECIO REAL
+            # Independientemente de pequeños cambios por slippage, ajustamos TP para que el RR final sea exactamente min_rr (ej: 1:2)
+            max_rr = self.min_rr
+            original_tp = take_profit
+            reward = risk * max_rr
+            if direction == 'BULLISH':
+                take_profit = entry_price + reward
+            else:
+                take_profit = entry_price - reward
+            
+            rr = reward / risk  # Debe ser igual a max_rr
+            self.logger.info(
+                f"[{symbol}] 📈 RR recalculado y FORZADO a {rr:.2f}:1 con precio real | "
+                f"Entry={entry_price:.5f}, SL={stop_loss:.5f}, TP original={original_tp:.5f} → TP ajustado={take_profit:.5f}"
+            )
             
             # Crear diccionario FVG con la información calculada y validada
             fvg = {
