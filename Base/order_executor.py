@@ -511,7 +511,7 @@ class OrderExecutor:
     
     def close_position(self, ticket: int) -> Dict:
         """
-        Cierra una posición existente por su ticket
+        Cierra una posición existente por su ticket usando TRADE_ACTION_DEAL
         
         Args:
             ticket: Número de ticket de la posición a cerrar
@@ -521,28 +521,88 @@ class OrderExecutor:
         """
         try:
             # Obtener información de la posición
-            position = mt5.positions_get(ticket=ticket)
-            if position is None or len(position) == 0:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions is None or len(positions) == 0:
                 return {
                     'success': False,
                     'message': f'Posición con ticket {ticket} no encontrada',
                     'error': 'POSITION_NOT_FOUND'
                 }
             
-            position_info = position[0]
+            position_info = positions[0]
             symbol = position_info.symbol
             volume = position_info.volume
-            order_type = OrderType.BUY if position_info.type == mt5.ORDER_TYPE_BUY else OrderType.SELL
+            position_type = position_info.type
             
-            # Crear orden de cierre (opuesta a la posición)
-            close_type = OrderType.SELL if order_type == OrderType.BUY else OrderType.BUY
+            # Obtener información del símbolo para precios
+            symbol_info = self._get_symbol_info(symbol)
+            if symbol_info is None:
+                return {
+                    'success': False,
+                    'message': f'No se pudo obtener información del símbolo {symbol}',
+                    'error': 'SYMBOL_INFO_ERROR'
+                }
             
-            return self.execute_order(
-                symbol=symbol,
-                order_type=close_type,
-                volume=volume,
-                comment=f"Cerrar posición {ticket}"
-            )
+            # Determinar precio de cierre según el tipo de posición
+            if position_type == mt5.ORDER_TYPE_BUY:
+                # Para cerrar una compra, vendemos al precio bid
+                price = symbol_info['bid']
+                deal_type = mt5.ORDER_TYPE_SELL
+            else:  # SELL
+                # Para cerrar una venta, compramos al precio ask
+                price = symbol_info['ask']
+                deal_type = mt5.ORDER_TYPE_BUY
+            
+            # Normalizar precio
+            price = self._normalize_price(symbol, price)
+            
+            # Crear solicitud de cierre usando TRADE_ACTION_DEAL con position
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': symbol,
+                'volume': volume,
+                'type': deal_type,
+                'position': ticket,  # Especificar el ticket de la posición a cerrar
+                'price': price,
+                'deviation': 20,  # Desviación máxima permitida en puntos
+                'magic': 0,
+                'comment': f"Cerrar posición {ticket}",
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC,  # Immediate or Cancel
+            }
+            
+            # Enviar solicitud
+            result = mt5.order_send(request)
+            
+            if result is None:
+                error_code = mt5.last_error()[0]
+                error_msg = mt5.last_error()[1]
+                self.logger.error(f"Error al cerrar posición {ticket}: {error_code} - {error_msg}")
+                return {
+                    'success': False,
+                    'message': error_msg,
+                    'error': f'MT5_ERROR_{error_code}'
+                }
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                self.logger.warning(f"Posición {ticket} no cerrada: {result.retcode} - {result.comment}")
+                return {
+                    'success': False,
+                    'message': result.comment,
+                    'error': f'MT5_RETCODE_{result.retcode}'
+                }
+            
+            # Obtener precio de cierre del resultado
+            close_price = result.price if hasattr(result, 'price') else price
+            
+            self.logger.info(f"✅ Posición {ticket} cerrada - Precio: {close_price:.5f}, Volumen: {volume}")
+            return {
+                'success': True,
+                'ticket': ticket,
+                'close_price': close_price,
+                'volume': volume,
+                'message': f'Posición {ticket} cerrada exitosamente'
+            }
             
         except Exception as e:
             self.logger.error(f"Error al cerrar posición {ticket}: {e}", exc_info=True)

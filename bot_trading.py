@@ -436,7 +436,23 @@ class TradingBot:
                 has_open_positions = has_mt5_positions or has_db_orders
                 
                 # Monitorear posiciones abiertas (siempre, independiente del horario operativo)
+                # IMPORTANTE: El monitoreo incluye cierre automático a las 4:50 PM NY
                 monitor_result = self._monitor_positions()
+                
+                # Verificar si hay acciones de cierre automático
+                actions = monitor_result.get('actions', [])
+                auto_close_actions = [a for a in actions if a.get('action') in ['auto_close', 'auto_close_partial']]
+                if auto_close_actions:
+                    for action in auto_close_actions:
+                        if action.get('closed_count', 0) > 0:
+                            self.logger.info(
+                                f"✅ Cierre automático (4:50 PM NY): {action['closed_count']} posición(es) cerrada(s)"
+                            )
+                        if action.get('pending_count', 0) > 0:
+                            self.logger.warning(
+                                f"⚠️  Cierre automático (4:50 PM NY): {action['pending_count']} posición(es) pendiente(s) - "
+                                f"Se seguirá intentando cerrar"
+                            )
                 
                 # Log de diagnóstico cada ciclo cuando hay órdenes en BD
                 if has_db_orders:
@@ -554,6 +570,19 @@ class TradingBot:
                             self._last_day_closed_log = time_module.time()
                         sleep_interval = 60  # Esperar 1 minuto antes de verificar de nuevo
                     elif self._is_trading_time():
+                        # Verificar si es hora de cierre automático (4:50 PM NY) - NO colocar nuevas entradas
+                        if self.position_monitor.auto_close_enabled and self.position_monitor.is_auto_close_time():
+                            if not hasattr(self, '_last_auto_close_warning'):
+                                self._last_auto_close_warning = 0
+                            if (time_module.time() - self._last_auto_close_warning) >= 60:
+                                self.logger.warning(
+                                    f"🕐 HORA DE CIERRE AUTOMÁTICO (4:50 PM NY) - "
+                                    f"NO se colocarán nuevas entradas - Solo monitoreando y cerrando posiciones abiertas"
+                                )
+                                self._last_auto_close_warning = time_module.time()
+                            sleep_interval = 5  # Monitorear más frecuentemente para cerrar posiciones
+                            continue  # Saltar análisis - solo monitorear y cerrar
+                        
                         # Solo analizar si estamos en horario operativo Y no se debe cerrar el día
                         # Verificar ANTES de analizar si la estrategia necesita monitoreo intensivo
                         needs_intensive = self.strategy_manager.needs_intensive_monitoring(strategy_name)

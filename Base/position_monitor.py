@@ -119,24 +119,43 @@ class PositionMonitor:
             
             actions = []
             
-            # 1. Verificar cierre automático por hora
+            # 1. PRIORIDAD: Verificar cierre automático por hora (4:50 PM NY)
+            # Esto debe ejecutarse SIEMPRE y con PRIORIDAD sobre cualquier otra operación
             if self.auto_close_enabled:
                 close_action = self._check_auto_close_time(positions)
                 if close_action:
                     actions.append(close_action)
-                    # Si hay posiciones pendientes, continuar monitoreo (no retornar aún)
                     # Actualizar lista de posiciones después de intentar cerrar
                     remaining_positions = self.executor.get_positions()
-                    if not remaining_positions:
+                    
+                    # Si cerramos algunas posiciones, loguearlo
+                    if close_action.get('closed_count', 0) > 0:
+                        self.logger.info(
+                            f"✅ Cierre automático (4:50 PM NY): {close_action['closed_count']} posición(es) cerrada(s)"
+                        )
+                    
+                    # Si aún hay posiciones pendientes, continuar intentando cerrar
+                    if close_action.get('pending_count', 0) > 0:
+                        self.logger.warning(
+                            f"⚠️  Cierre automático (4:50 PM NY): {close_action['pending_count']} posición(es) pendiente(s) - "
+                            f"Se seguirá intentando cerrar en cada ciclo de monitoreo"
+                        )
+                        # Continuar con trailing stop pero priorizar cierre en el próximo ciclo
+                        positions = remaining_positions
+                    elif not remaining_positions:
                         # Todas las posiciones fueron cerradas exitosamente
+                        self.logger.info(
+                            f"✅ Cierre automático (4:50 PM NY) completado - Todas las posiciones cerradas"
+                        )
                         return {
                             'success': True,
-                            'message': f'Todas las posiciones cerradas por hora de cierre',
+                            'message': f'Todas las posiciones cerradas por hora de cierre (4:50 PM NY)',
                             'actions': actions,
                             'open_count': 0
                         }
-                    # Aún hay posiciones pendientes - continuar con trailing stop y seguir intentando cerrar
-                    positions = remaining_positions
+                    else:
+                        # Actualizar lista de posiciones para continuar con trailing stop
+                        positions = remaining_positions
             
             # 2. Aplicar trailing stop loss a cada posición
             if self.trailing_enabled:
@@ -179,9 +198,25 @@ class PositionMonitor:
             current_sl = position.get('price_stop_loss', 0) or 0
             take_profit = position.get('price_take_profit', 0) or 0
             
+            # Obtener precio actual del mercado para verificar (más preciso que price_current de la posición)
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                # Para SELL usar bid, para BUY usar ask
+                if position_type == 'SELL':
+                    market_price = float(tick.bid)
+                else:  # BUY
+                    market_price = float(tick.ask)
+                # Usar el precio del mercado si está disponible (más actualizado)
+                if abs(market_price - current_price) > 0.00001:  # Si hay diferencia significativa
+                    current_price = market_price
+                    self.logger.debug(
+                        f"[{symbol}] Precio actualizado desde mercado: {position['price_current']:.5f} → {current_price:.5f}"
+                    )
+            
             # Necesitamos TP para calcular el movimiento
             if take_profit <= 0:
                 # Si no hay TP, no podemos aplicar trailing stop
+                self.logger.debug(f"[{symbol}] ⏸️  Trailing stop: No hay TP definido para ticket {ticket}")
                 return None
             
             # Calcular movimiento total esperado
@@ -201,8 +236,36 @@ class PositionMonitor:
             # Calcular porcentaje de progreso
             progress_percent = current_movement / total_movement
             
+            # Log periódico cuando está cerca del 70% (cada 10 segundos)
+            current_time = time_module.time()
+            log_key = f"trailing_log_{ticket}"
+            if not hasattr(self, '_last_trailing_logs'):
+                self._last_trailing_logs = {}
+            
+            # Log cuando está cerca del umbral (65% o más) pero aún no alcanza el 70%
+            if 0.65 <= progress_percent < self.trailing_trigger_percent:
+                if log_key not in self._last_trailing_logs or (current_time - self._last_trailing_logs[log_key]) >= 10:
+                    self.logger.info(
+                        f"[{symbol}] 📊 Monitoreando trailing stop - Ticket: {ticket} | "
+                        f"Progreso: {progress_percent:.1%} | "
+                        f"Esperando alcanzar {self.trailing_trigger_percent*100:.0f}% para mover SL a {self.trailing_sl_percent*100:.0f}% | "
+                        f"Entry: {entry_price:.5f} | Current: {current_price:.5f} | TP: {take_profit:.5f} | "
+                        f"Movimiento: {current_movement:.5f}/{total_movement:.5f}"
+                    )
+                    self._last_trailing_logs[log_key] = current_time
+            
             # Verificar si alcanzó el 70% del movimiento
+            # Usar >= en lugar de < para incluir exactamente el 70%
             if progress_percent < self.trailing_trigger_percent:
+                # Log detallado cuando está muy cerca pero aún no alcanza
+                if progress_percent >= 0.68:  # Muy cerca del umbral
+                    if log_key not in self._last_trailing_logs or (current_time - self._last_trailing_logs[log_key]) >= 5:
+                        self.logger.debug(
+                            f"[{symbol}] ⏳ Trailing stop: Muy cerca del umbral - "
+                            f"Progreso: {progress_percent:.2%} (falta {((self.trailing_trigger_percent - progress_percent) * 100):.2f}% para {self.trailing_trigger_percent*100:.0f}%) | "
+                            f"Precio actual: {current_price:.5f}"
+                        )
+                        self._last_trailing_logs[log_key] = current_time
                 return None  # Aún no alcanza el 70%
             
             # Calcular nuevo SL a 50% del movimiento
@@ -216,9 +279,16 @@ class PositionMonitor:
                     # Verificar si el precio actual permite un SL mejor
                     if current_price <= current_sl:
                         # El precio retrocedió, no podemos mejorar el SL
+                        self.logger.debug(
+                            f"[{symbol}] ⏸️  Trailing stop: Precio retrocedió (Current: {current_price:.5f} <= SL: {current_sl:.5f}) - "
+                            f"No se puede mejorar SL"
+                        )
                         return None
                     # Solo actualizar si el nuevo SL está más cerca del precio actual pero aún es mejor que el actual
                     if target_sl <= current_sl:
+                        self.logger.debug(
+                            f"[{symbol}] ⏸️  Trailing stop: SL objetivo ({target_sl:.5f}) no es mejor que SL actual ({current_sl:.5f})"
+                        )
                         return None
             else:  # SELL
                 # SL a 50% del movimiento desde entry
@@ -230,9 +300,16 @@ class PositionMonitor:
                     # Verificar si el precio actual permite un SL mejor
                     if current_price >= current_sl:
                         # El precio retrocedió, no podemos mejorar el SL
+                        self.logger.debug(
+                            f"[{symbol}] ⏸️  Trailing stop: Precio retrocedió (Current: {current_price:.5f} >= SL: {current_sl:.5f}) - "
+                            f"No se puede mejorar SL"
+                        )
                         return None
                     # Solo actualizar si el nuevo SL está más cerca del precio actual pero aún es mejor que el actual
                     if target_sl >= current_sl:
+                        self.logger.debug(
+                            f"[{symbol}] ⏸️  Trailing stop: SL objetivo ({target_sl:.5f}) no es mejor que SL actual ({current_sl:.5f})"
+                        )
                         return None
             
             # Verificar que el nuevo SL es válido
@@ -243,12 +320,20 @@ class PositionMonitor:
                 self.logger.warning(f"[{symbol}] SL objetivo inválido para SELL: {target_sl:.5f} (Entry: {entry_price:.5f}, Current: {current_price:.5f})")
                 return None
             
+            # Log antes de aplicar
+            self.logger.info(
+                f"[{symbol}] 🔄 Aplicando Trailing Stop - Ticket: {ticket} | "
+                f"Progreso: {progress_percent:.1%} (>= {self.trailing_trigger_percent*100:.0f}%) | "
+                f"SL actual: {current_sl:.5f} → SL objetivo: {target_sl:.5f} ({self.trailing_sl_percent*100:.0f}% del movimiento) | "
+                f"Entry: {entry_price:.5f} | Current: {current_price:.5f} | TP: {take_profit:.5f}"
+            )
+            
             # Aplicar modificación del SL
             result = self.executor.modify_position_sl(ticket, target_sl, take_profit)
             
             if result['success']:
                 self.logger.info(
-                    f"[{symbol}] ✅ Trailing Stop aplicado - Ticket: {ticket} | "
+                    f"[{symbol}] ✅ Trailing Stop aplicado exitosamente - Ticket: {ticket} | "
                     f"Progreso: {progress_percent:.1%} | "
                     f"SL: {current_sl:.5f} → {target_sl:.5f} | "
                     f"Precio actual: {current_price:.5f}"
@@ -272,6 +357,30 @@ class PositionMonitor:
             self.logger.error(f"Error al verificar trailing stop para posición {position.get('ticket', 'unknown')}: {e}", exc_info=True)
             return None
     
+    def is_auto_close_time(self) -> bool:
+        """
+        Verifica si es hora de cierre automático (4:50 PM NY)
+        
+        Returns:
+            True si es hora de cerrar posiciones, False en caso contrario
+        """
+        # Verificar primero si el cierre automático está habilitado en la configuración
+        if not self.auto_close_enabled:
+            return False
+        
+        try:
+            # Obtener hora actual en timezone de NY
+            now_ny = datetime.now(self.close_tz)
+            current_time = now_ny.time()
+            
+            # Verificar si es 4:50 PM o después (cerrar desde 4:50 hasta el fin del día)
+            close_start = time(self.close_time.hour, self.close_time.minute)
+            
+            return current_time >= close_start
+        except Exception as e:
+            self.logger.error(f"Error al verificar hora de cierre automático: {e}", exc_info=True)
+            return False
+    
     def _check_auto_close_time(self, positions: List[Dict]) -> Optional[Dict]:
         """
         Verifica si es hora de cerrar posiciones automáticamente (4:50 PM NY)
@@ -283,34 +392,40 @@ class PositionMonitor:
             Dict con información de cierres realizados o None
         """
         try:
-            # Obtener hora actual en timezone de NY
-            now_ny = datetime.now(self.close_tz)
-            current_time = now_ny.time()
-            
-            # Verificar si es 4:50 PM o después (cerrar desde 4:50 hasta el fin del día)
-            close_start = time(self.close_time.hour, self.close_time.minute)
-            
-            if current_time < close_start:
+            # Verificar si es hora de cerrar
+            if not self.is_auto_close_time():
                 return None  # Aún no es hora de cerrar
             
-            # Es 4:50 PM o después - Intentar cerrar todas las posiciones
+            # Obtener hora actual en timezone de NY
+            now_ny = datetime.now(self.close_tz)
+            
+            # Es 4:50 PM o después - CERRAR TODAS LAS POSICIONES ABIERTAS
             # IMPORTANTE: Continuar intentando hasta que TODAS las posiciones estén cerradas
-            # No usar cache para prevenir reintentos - necesitamos seguir intentando incluso si el mercado está cerrado
+            # Esto tiene PRIORIDAD sobre cualquier otra operación (trailing stop, etc.)
             
             closed_positions = []
             errors = []
             pending_positions = []
+            
+            # Log inicial cuando se detecta la hora de cierre
+            today = now_ny.date()
+            today_key = f"auto_close_today_{today}"
+            if today_key not in self.daily_close_cache:
+                self.logger.warning(
+                    f"🕐 HORA DE CIERRE AUTOMÁTICO (4:50 PM NY) - "
+                    f"Cerrando TODAS las posiciones abiertas ({len(positions)} posición(es))"
+                )
+                self.daily_close_cache.add(today_key)
             
             for position in positions:
                 ticket = position['ticket']
                 symbol = position['symbol']
                 
                 # Verificar si ya intentamos cerrar esta posición hoy (evitar spam de logs)
-                today = now_ny.date()
                 attempt_key = f"close_attempt_{ticket}_{today}"
                 
                 if attempt_key not in self.daily_close_cache:
-                    self.logger.info(f"[{symbol}] 🕐 Hora de cierre automático (4:50 PM NY) - Cerrando posición {ticket}")
+                    self.logger.info(f"[{symbol}] 🕐 Cerrando posición {ticket} (cierre automático 4:50 PM NY)")
                     self.daily_close_cache.add(attempt_key)
                 else:
                     # Ya intentamos antes, intentar de nuevo (puede que el mercado haya vuelto a abrir)
@@ -359,16 +474,21 @@ class PositionMonitor:
                     f"{len(pending_positions)} pendiente(s)"
                 )
             
-            # Si hay posiciones pendientes, continuar intentando
+            # Si hay posiciones pendientes, continuar intentando (PRIORIDAD MÁXIMA)
             if pending_positions:
-                # Log solo cada 60 segundos para no saturar
+                # Log cada 30 segundos para mantener visibilidad
                 current_time_sec = time_module.time()
                 last_warning_key = f"pending_close_warning_{today}"
-                if not hasattr(self, '_last_pending_warning') or (current_time_sec - getattr(self, '_last_pending_warning', 0)) >= 60:
+                if not hasattr(self, '_last_pending_warning') or (current_time_sec - getattr(self, '_last_pending_warning', 0)) >= 30:
                     self.logger.warning(
-                        f"🔄 {len(pending_positions)} posición(es) pendiente(s) de cierre automático (4:50 PM NY) - "
-                        f"Se seguirá intentando cerrar en cada ciclo de monitoreo hasta que se cierren todas"
+                        f"🔄 CIERRE AUTOMÁTICO (4:50 PM NY): {len(pending_positions)} posición(es) pendiente(s) - "
+                        f"Se seguirá intentando cerrar en cada ciclo de monitoreo hasta que se cierren TODAS"
                     )
+                    # Mostrar detalles de posiciones pendientes
+                    for pos in pending_positions[:5]:  # Mostrar máximo 5
+                        self.logger.warning(f"   ⚠️  Pendiente: {pos['symbol']} - Ticket: {pos['ticket']}")
+                    if len(pending_positions) > 5:
+                        self.logger.warning(f"   ... y {len(pending_positions) - 5} más")
                     self._last_pending_warning = current_time_sec
                 
                 return {
