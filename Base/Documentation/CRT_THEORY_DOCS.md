@@ -202,24 +202,65 @@ Vela Actual: High = 1.1005, Low = 1.0960, Close = 1.0970
 
 ## 🎯 Tipos de CRT
 
-La estrategia CRT se puede clasificar en **3 tipos principales**, cada uno con características específicas:
+La estrategia CRT se puede clasificar en **3 tipos principales**, cada uno con características específicas y condiciones únicas:
 
-### Tipo 1: CRT de Reversión (Reversal CRT)
-- **Enfoque:** Detectar reversiones después de barridos de liquidez.
-- **Señal:** Barrido seguido de cierre dentro del rango.
-- **Objetivo:** Extremo opuesto de la vela manipulada.
+### Tipo 1: CRT de Continuación (Continuation CRT)
 
-### Tipo 2: CRT de Continuación (Continuation CRT)
-- **Enfoque:** Identificar continuaciones después de manipulación de liquidez.
-- **Señal:** Barrido que confirma la tendencia existente.
-- **Objetivo:** Extensión de la tendencia actual.
+**Enfoque:** Detectar continuaciones de tendencia después de manipulación de liquidez.
 
-### Tipo 3: CRT de Consolidación (Consolidation CRT)
-- **Enfoque:** Operar dentro de rangos consolidados.
-- **Señal:** Manipulaciones en rangos laterales.
-- **Objetivo:** Extremos del rango de consolidación.
+**Condiciones:**
+- La vela 5 AM debe barrer un extremo de la vela 1 AM (HIGH o LOW)
+- El **CLOSE** de la vela 5 AM debe estar **FUERA** del rango completo (HIGH-LOW) de la vela 1 AM
+- Indica continuación en la dirección del barrido
 
-**Nota:** Cada tipo será documentado en detalle con ejemplos específicos.
+**Objetivo (TP):**
+- Si barrió HIGH → TP = HIGH de vela 5 AM (continuación alcista)
+- Si barrió LOW → TP = LOW de vela 5 AM (continuación bajista)
+
+**Documentación completa:** Ver [CRT_CONTINUATION_DOCS.md](./CRT_CONTINUATION_DOCS.md)
+
+### Tipo 2: CRT de Revisión (Revision CRT)
+
+**Enfoque:** Detectar reversiones después de barridos de liquidez.
+
+**Condiciones:**
+- La vela 5 AM debe barrer UN extremo de la vela 1 AM (HIGH o LOW, pero NO ambos)
+- El **CUERPO** de la vela 5 AM debe cerrar **DENTRO** del rango completo (HIGH-LOW) de la vela 1 AM
+- Indica reversión hacia el extremo opuesto
+
+**Objetivo (TP):**
+- Si barrió HIGH → TP = LOW de vela 1 AM (reversión bajista)
+- Si barrió LOW → TP = HIGH de vela 1 AM (reversión alcista)
+
+**Documentación completa:** Ver [CRT_REVISION_DOCS.md](./CRT_REVISION_DOCS.md)
+
+### Tipo 3: CRT de Extremo (Extreme CRT)
+
+**Enfoque:** Detectar cuando se barren ambos extremos simultáneamente, indicando alta volatilidad y dirección según el cierre.
+
+**Condiciones:**
+- La vela 5 AM debe barrer **AMBOS extremos** de la vela 1 AM:
+  - HIGH de vela 5 AM > HIGH de vela 1 AM
+  - LOW de vela 5 AM < LOW de vela 1 AM
+- El objetivo se define según el tipo de cierre de la vela 5 AM
+
+**Objetivo (TP):**
+- Si cerró alcista (Close > Open) → TP = HIGH de vela 5 AM
+- Si cerró bajista (Close < Open) → TP = LOW de vela 5 AM
+
+**Documentación completa:** Ver [CRT_EXTREME_DOCS.md](./CRT_EXTREME_DOCS.md)
+
+---
+
+### Comparación de los 3 Tipos
+
+| Tipo | Barridos | Cierre | TP | Dirección |
+|------|----------|--------|----|-----------| 
+| **Continuación** | 1 extremo (HIGH o LOW) | CLOSE fuera del rango | Extremo de vela 5 AM | Misma del barrido |
+| **Revisión** | 1 extremo (HIGH o LOW) | CUERPO dentro del rango | Extremo opuesto de vela 1 AM | Opuesta al barrido |
+| **Extremo** | AMBOS extremos (HIGH y LOW) | Según cierre | HIGH o LOW de vela 5 AM según cierre | Según cierre |
+
+**Nota:** Cada tipo tiene documentación detallada con ejemplos específicos y casos de uso.
 
 ---
 
@@ -364,6 +405,29 @@ La **CRT (Candle Range Theory)** es una metodología poderosa que:
 - Requiere experiencia para identificar patrones correctamente.
 - Necesita confirmación multi-temporal.
 - Puede generar señales falsas en mercados laterales.
+
+---
+
+---
+
+## 📚 Documentación Específica por Tipo
+
+Cada tipo de CRT tiene documentación detallada:
+
+1. **CRT de Continuación:** [CRT_CONTINUATION_DOCS.md](./CRT_CONTINUATION_DOCS.md)
+   - Condiciones de detección
+   - Ejemplos prácticos
+   - Configuración y uso
+
+2. **CRT de Revisión:** [CRT_REVISION_DOCS.md](./CRT_REVISION_DOCS.md)
+   - Condiciones de detección
+   - Ejemplos prácticos
+   - Configuración y uso
+
+3. **CRT de Extremo:** [CRT_EXTREME_DOCS.md](./CRT_EXTREME_DOCS.md)
+   - Condiciones de detección
+   - Ejemplos prácticos
+   - Configuración y uso
 
 ---
 
