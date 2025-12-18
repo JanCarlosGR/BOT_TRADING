@@ -22,6 +22,25 @@ from .order_executor import (
     sell_order,
 )
 from .turtle_soup_detector import detect_turtle_soup_h4, TurtleSoupDetector
+from .crt_detector import (
+    detect_crt_sweep,
+    detect_crt_vayas,
+    detect_engulfing,
+    CRTDetector,
+)
+from .crt_continuation_detector import (
+    detect_crt_continuation,
+    CRTContinuationDetector,
+)
+from .crt_revision_detector import (
+    detect_crt_revision,
+    CRTRevisionDetector,
+)
+from .crt_extreme_detector import (
+    detect_crt_extreme,
+    CRTextremeDetector,
+)
+from .strategy_scheduler import StrategyScheduler
 
 __all__ = [
     # Candle Reader
@@ -48,5 +67,21 @@ __all__ = [
     # Turtle Soup Detector
     'detect_turtle_soup_h4',
     'TurtleSoupDetector',
+    # CRT Detector
+    'detect_crt_sweep',
+    'detect_crt_vayas',
+    'detect_engulfing',
+    'CRTDetector',
+    # CRT Continuation Detector
+    'detect_crt_continuation',
+    'CRTContinuationDetector',
+    # CRT Revision Detector
+    'detect_crt_revision',
+    'CRTRevisionDetector',
+    # CRT Extreme Detector
+    'detect_crt_extreme',
+    'CRTextremeDetector',
+    # Strategy Scheduler
+    'StrategyScheduler',
 ]
 

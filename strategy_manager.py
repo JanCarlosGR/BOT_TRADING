@@ -25,10 +25,18 @@ class StrategyManager:
         # Registrar estrategias disponibles
         from strategies.turtle_soup_fvg_strategy import TurtleSoupFVGStrategy
         from strategies.default_strategy import DefaultStrategy
+        from strategies.crt_strategy import CRTStrategy
+        from strategies.crt_continuation_strategy import CRTContinuationStrategy
+        from strategies.crt_revision_strategy import CRTRevisionStrategy
+        from strategies.crt_extreme_strategy import CRTextremeStrategy
         
         self.strategies = {
             'default': DefaultStrategy(config),
             'turtle_soup_fvg': TurtleSoupFVGStrategy(config),
+            'crt_strategy': CRTStrategy(config),
+            'crt_continuation': CRTContinuationStrategy(config),
+            'crt_revision': CRTRevisionStrategy(config),
+            'crt_extreme': CRTextremeStrategy(config),
             # Aquí se agregarán más estrategias
             # 'rsi_strategy': RSIStrategy(config),
             # 'moving_average': MovingAverageStrategy(config),

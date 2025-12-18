@@ -41,7 +41,10 @@ BOT OF TRADING/
         ├── CANDLE_READER_DOCS.md
         ├── FVG_DETECTOR_DOCS.md
         ├── NEWS_CHECKER_DOCS.md
-        └── ORDER_EXECUTOR_DOCS.md
+        ├── ORDER_EXECUTOR_DOCS.md
+        ├── TURTLE_SOUP_DETECTOR_DOCS.md
+        ├── DATABASE_LOGGING_DOCS.md
+        └── CRT_THEORY_DOCS.md
 ```
 
 ---

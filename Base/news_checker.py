@@ -733,17 +733,11 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
     # Obtener todas las noticias de hoy y próximas horas (para USD/EUR, 3 estrellas)
     all_news = scrape_investing_calendar(symbol, min_impact=3, currencies=['USD', 'EUR'], hours_ahead=24)
     
-    # Logging para depuración
-    logger.debug(f"[{symbol}] Scraping de noticias: {len(all_news) if all_news else 0} noticias encontradas")
-    if all_news:
-        logger.debug(f"[{symbol}] Primeras noticias encontradas:")
-        for i, news in enumerate(all_news[:5]):  # Mostrar primeras 5
-            logger.debug(f"  {i+1}. {news.get('title', 'N/A')} - {news.get('currency', 'N/A')} - "
-                        f"Impacto: {news.get('impact_level', news.get('impact', 0))} - "
-                        f"Hora: {news.get('time_str', 'N/A')}")
+    # Logging mejorado para mostrar noticias detectadas
+    logger.info(f"[{symbol}] 📰 Verificando noticias económicas (USD/EUR, 3 estrellas)...")
     
     if not all_news:
-        logger.debug(f"[{symbol}] No se encontraron noticias en el scraping. Verificando conexión y estructura HTML...")
+        logger.warning(f"[{symbol}] ⚠️  No se encontraron noticias en el scraping. Verificando conexión y estructura HTML...")
         return True, "No hay noticias de alto impacto próximas", None
     
     # Filtrar noticias relevantes (hoy y próximas 24 horas) - SOLO 3 ESTRELLAS
@@ -770,8 +764,8 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
                     news_time = pytz.utc.localize(news_time)
                 news_time = news_time.astimezone(ny_tz)
             
-            # Solo noticias de hoy en adelante
-            if news_time >= now_ny.replace(hour=0, minute=0, second=0, microsecond=0):
+            # Solo noticias PENDIENTES (futuras, no pasadas)
+            if news_time > now_ny:
                 relevant_news.append({
                     'time': news_time,
                     'title': news.get('title', 'Sin título'),
@@ -783,13 +777,25 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
             continue
     
     # Logging del resumen de filtrado
-    logger.debug(f"[{symbol}] Resumen de filtrado: {len(all_news)} noticias totales, "
+    logger.info(f"[{symbol}] 📊 Resumen de filtrado: {len(all_news)} noticias totales en scraping, "
                 f"{filtered_count} filtradas (impacto < 3 o holiday), "
-                f"{len(relevant_news)} noticias relevantes (3 estrellas, futuras)")
+                f"{len(relevant_news)} noticias PENDIENTES (3 estrellas, futuras)")
     
     if not relevant_news:
-        logger.debug(f"[{symbol}] No hay noticias relevantes después del filtrado")
+        logger.info(f"[{symbol}] ✅ No hay noticias PENDIENTES (3 estrellas, futuras)")
         return True, "No hay noticias de alto impacto próximas", None
+    
+    # Mostrar solo noticias PENDIENTES (futuras)
+    logger.info(f"[{symbol}] 📰 Noticias PENDIENTES encontradas ({len(relevant_news)}):")
+    for i, news in enumerate(relevant_news[:10]):  # Mostrar primeras 10
+        news_time = news.get('time')
+        time_str = news_time.strftime('%Y-%m-%d %H:%M:%S %Z') if isinstance(news_time, datetime) else 'N/A'
+        time_until = (news_time - now_ny).total_seconds() / 60  # Minutos hasta la noticia
+        hours = int(time_until // 60)
+        minutes = int(time_until % 60)
+        time_until_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        logger.info(f"[{symbol}]   {i+1}. {news.get('title', 'N/A')} ({news.get('currency', 'N/A')}) - "
+                   f"Hora: {time_str} (en {time_until_str})")
     
     # Ordenar por tiempo
     relevant_news.sort(key=lambda x: x['time'])
@@ -802,6 +808,9 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
         # Si estamos dentro del período de bloqueo antes de la noticia
         if now_ny >= time_before_news and now_ny < news_time:
             time_until_news = (news_time - now_ny).total_seconds() / 60
+            news_time_str = news_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+            logger.warning(f"[{symbol}] ⏸️  BLOQUEADO: Noticia en {time_until_news:.1f} minutos | "
+                          f"Evento: {news['title']} ({news['currency']}) | Hora: {news_time_str}")
             return False, f"Bloqueado: Noticia en {time_until_news:.1f} minutos ({news['title']})", news
         
         # Si la noticia ya pasó, verificar si estamos en el período de espera post-noticia
@@ -841,8 +850,12 @@ def can_trade_now(symbol: str, minutes_before: int = 5, minutes_after: int = 5, 
     
     if next_news:
         time_until_next = (next_news['time'] - now_ny).total_seconds() / 60
+        next_news_time_str = next_news['time'].strftime('%Y-%m-%d %H:%M:%S %Z')
+        logger.info(f"[{symbol}] ✅ Puede operar | Próxima noticia en {time_until_next:.1f} minutos: "
+                   f"{next_news['title']} ({next_news['currency']}) a las {next_news_time_str}")
         return True, f"Próxima noticia en {time_until_next:.1f} minutos", next_news
     
+    logger.info(f"[{symbol}] ✅ Puede operar | No hay noticias próximas")
     return True, "No hay noticias próximas", None
 
 

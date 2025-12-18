@@ -60,7 +60,26 @@ class OrderExecutor:
                 self.logger.error("No se pudo reconectar a MT5 después del intento")
                 return False
         
-        self.logger.debug(f"MT5 conectado - Cuenta: {account_info.login}")
+        # ⚠️ VERIFICAR PERMISOS DE TRADING
+        # El error 10017 "Trade disabled" ocurre cuando el trading está deshabilitado
+        # Verificar si el trading está habilitado en la cuenta
+        if hasattr(account_info, 'trade_allowed') and not account_info.trade_allowed:
+            self.logger.error(
+                f"❌ TRADING DESHABILITADO en la cuenta MT5 (Login: {account_info.login}) | "
+                f"Error 10017: Trade disabled | "
+                f"SOLUCIÓN: Habilita el trading automático en MT5 (Tools > Options > Expert Advisors > Allow automated trading)"
+            )
+            return False
+        
+        if hasattr(account_info, 'trade_expert') and not account_info.trade_expert:
+            self.logger.error(
+                f"❌ TRADING DE EXPERT ADVISORS DESHABILITADO en la cuenta MT5 (Login: {account_info.login}) | "
+                f"Error 10017: Trade disabled | "
+                f"SOLUCIÓN: Habilita el trading automático en MT5 (Tools > Options > Expert Advisors > Allow automated trading)"
+            )
+            return False
+        
+        self.logger.debug(f"MT5 conectado - Cuenta: {account_info.login} | Trading habilitado: {getattr(account_info, 'trade_allowed', 'N/A')}")
         return True
     
     def _get_symbol_info(self, symbol: str) -> Optional[Dict]:
@@ -328,6 +347,28 @@ class OrderExecutor:
         try:
             # Verificar y reconectar MT5 si es necesario
             if not self._verify_mt5_connection():
+                # Verificar si el error es por trading deshabilitado
+                account_info = mt5.account_info()
+                if account_info is not None:
+                    if hasattr(account_info, 'trade_allowed') and not account_info.trade_allowed:
+                        return {
+                            'success': False,
+                            'order_ticket': None,
+                            'price': None,
+                            'volume': None,
+                            'error': 'TRADE_DISABLED',
+                            'message': 'Trading deshabilitado en MT5 - Habilita el trading automático en MT5 (Tools > Options > Expert Advisors > Allow automated trading)'
+                        }
+                    if hasattr(account_info, 'trade_expert') and not account_info.trade_expert:
+                        return {
+                            'success': False,
+                            'order_ticket': None,
+                            'price': None,
+                            'volume': None,
+                            'error': 'TRADE_DISABLED',
+                            'message': 'Trading de Expert Advisors deshabilitado en MT5 - Habilita el trading automático en MT5 (Tools > Options > Expert Advisors > Allow automated trading)'
+                        }
+                
                 return {
                     'success': False,
                     'order_ticket': None,
@@ -366,14 +407,26 @@ class OrderExecutor:
             
             # Verificar resultado
             if result.retcode != mt5.TRADE_RETCODE_DONE:
-                self.logger.warning(f"Orden no ejecutada: {result.retcode} - {result.comment}")
+                error_msg = result.comment
+                # Mensaje más claro para error 10017 (Trade disabled)
+                if result.retcode == 10017:
+                    error_msg = (
+                        f"Trading deshabilitado en MT5 (Error 10017) | "
+                        f"SOLUCIÓN: Habilita el trading automático en MT5: "
+                        f"Tools > Options > Expert Advisors > Allow automated trading | "
+                        f"También verifica que el botón 'AutoTrading' esté activado en la barra de herramientas de MT5"
+                    )
+                    self.logger.error(f"❌ {error_msg}")
+                else:
+                    self.logger.warning(f"Orden no ejecutada: {result.retcode} - {result.comment}")
+                
                 return {
                     'success': False,
                     'order_ticket': result.order,
                     'price': result.price,
                     'volume': result.volume,
                     'error': f'MT5_RETCODE_{result.retcode}',
-                    'message': result.comment
+                    'message': error_msg
                 }
             
             # Orden ejecutada exitosamente

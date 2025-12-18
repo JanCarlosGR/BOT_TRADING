@@ -16,6 +16,7 @@ from Base.trading_hours import TradingHoursManager
 from Base.position_monitor import PositionMonitor
 from Base.database import DatabaseManager
 from Base.db_log_handler import DatabaseLogHandler
+from Base.strategy_scheduler import StrategyScheduler
 
 
 class TradingBot:
@@ -37,6 +38,7 @@ class TradingBot:
         self.strategy_manager = StrategyManager(self.config)
         self.trading_hours = TradingHoursManager(self.config['trading_hours'])
         self.position_monitor = PositionMonitor(self.config)
+        self.strategy_scheduler = StrategyScheduler(self.config)
         
         # Inicializar base de datos y configurar handler de logging
         self.db_manager = DatabaseManager(self.config)
@@ -171,7 +173,8 @@ class TradingBot:
             return
         
         symbols = self.config['symbols']
-        strategy_name = self.config['strategy']['name']
+        # Obtener estrategia activa según el scheduler (puede cambiar por jornada)
+        strategy_name = self.strategy_scheduler.get_current_strategy()
         
         # ⚠️ VERIFICACIÓN TEMPRANA: Si la estrategia alcanzó el límite de trades, detener análisis
         strategy = self.strategy_manager.strategies.get(strategy_name)
@@ -393,7 +396,16 @@ class TradingBot:
         self.logger.info("=" * 50)
         self.logger.info(f"Activos: {', '.join(self.config['symbols'])}")
         self.logger.info(f"Horario operativo: {self.config['trading_hours']['start_time']} - {self.config['trading_hours']['end_time']} ({self.config['trading_hours']['timezone']})")
-        self.logger.info(f"Estrategia: {self.config['strategy']['name']}")
+        
+        # Mostrar información de estrategia según el modo
+        if self.strategy_scheduler.enabled:
+            session_info = self.strategy_scheduler.get_current_session_info()
+            if session_info:
+                self.logger.info(f"📅 Sistema de jornadas activo - Sesión actual: '{session_info['name']}' → Estrategia: '{session_info['strategy']}'")
+            else:
+                self.logger.info(f"📅 Sistema de jornadas activo - Estrategia actual: '{self.strategy_scheduler.get_current_strategy()}'")
+        else:
+            self.logger.info(f"Estrategia: {self.config['strategy']['name']}")
         
         # Verificar si el día actual es operativo
         is_trading_day, day_reason, holidays = self.trading_hours.is_trading_day()
@@ -501,7 +513,8 @@ class TradingBot:
                 else:
                     # SOLO si NO hay posiciones abiertas: verificar si se debe cerrar el día operativo
                     # Verificar si se alcanzó el límite diario o si el primer TP cerró el día
-                    strategy_name = self.config['strategy']['name']
+                    # Obtener estrategia activa según el scheduler
+                    strategy_name = self.strategy_scheduler.get_current_strategy()
                     strategy = self.strategy_manager.strategies.get(strategy_name)
                     
                     should_close_day = False
@@ -561,8 +574,15 @@ class TradingBot:
                                 sleep_interval = 1
                                 self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Monitoreo intensivo activado - Cambiando a intervalo de 1 segundo")
                             else:
-                                # Modo normal: usar intervalo configurado
-                                sleep_interval = 60
+                                # Verificar si la estrategia está esperando FVG (monitoreo intermedio)
+                                strategy = self.strategy_manager.strategies.get(strategy_name)
+                                if strategy and hasattr(strategy, '_waiting_for_fvg') and strategy._waiting_for_fvg:
+                                    # Monitoreo intermedio: analizar cada 10 segundos cuando hay Turtle Soup pero no FVG
+                                    sleep_interval = 10
+                                    self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Monitoreo intermedio activo (esperando FVG) - Analizando cada 10 segundos...")
+                                else:
+                                    # Modo normal: usar intervalo configurado
+                                    sleep_interval = 60
                     else:
                         # Fuera de horario operativo - verificar si es por día no operativo o por hora
                         is_trading_day, day_reason, holidays = self.trading_hours.is_trading_day()

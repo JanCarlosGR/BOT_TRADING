@@ -122,6 +122,9 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                     self.logger.info(f"[{symbol}] ⏸️  Turtle Soup desapareció - Cancelando monitoreo intensivo")
                     self.monitoring_fvg = False
                     self.monitoring_fvg_data = None
+                # Cancelar también monitoreo intermedio
+                if hasattr(self, '_waiting_for_fvg'):
+                    self._waiting_for_fvg = False
                 self.logger.info(f"[{symbol}] ⏸️  Etapa 2/4: Esperando - No hay Turtle Soup detectado en H4")
                 return None
             
@@ -141,6 +144,9 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             
             if entry_signal:
                 # 4. Ejecutar orden
+                # Cancelar monitoreo intermedio si estaba activo
+                if hasattr(self, '_waiting_for_fvg'):
+                    self._waiting_for_fvg = False
                 self.logger.info(f"[{symbol}] 💹 Etapa 4/4: Ejecutando orden...")
                 return self._execute_order(symbol, turtle_soup, entry_signal)
             else:
@@ -179,9 +185,22 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                         self.monitoring_fvg = False
                         self.monitoring_fvg_data = None
                 
-                # Solo log si no está en monitoreo intensivo (para evitar saturación)
+                # Cuando hay Turtle Soup pero no hay FVG, activar monitoreo intermedio
+                # Esto permite detectar FVG más rápido sin saturar con logs
                 if not self.monitoring_fvg:
-                    self.logger.info(f"[{symbol}] ⏸️  Etapa 3/4: Esperando - No hay señal de entrada FVG válida aún")
+                    # Activar monitoreo intermedio (cada 5-10 segundos) cuando hay Turtle Soup pero no FVG
+                    if not hasattr(self, '_waiting_for_fvg') or not self._waiting_for_fvg:
+                        self._waiting_for_fvg = True
+                        self.logger.info(f"[{symbol}] ⏳ Turtle Soup detectado pero sin FVG - Activando monitoreo intermedio")
+                        self.logger.info(f"[{symbol}]    • El bot analizará cada 10 segundos buscando FVG {self.entry_timeframe}")
+                        self.logger.info(f"[{symbol}]    • Turtle Soup: {turtle_soup['sweep_type']} | TP: {turtle_soup['target_price']:.5f} | Dirección: {turtle_soup['direction']}")
+                        self.logger.info(f"[{symbol}]    • Esperando FVG {'BAJISTA' if turtle_soup['direction'] == 'BEARISH' else 'ALCISTA'} en {self.entry_timeframe}")
+                    
+                    # Log periódico cada 30 segundos para indicar que sigue esperando
+                    current_time = time.time()
+                    if not hasattr(self, '_last_waiting_log') or (current_time - self._last_waiting_log) >= 30:
+                        self.logger.info(f"[{symbol}] ⏸️  Etapa 3/4: Esperando FVG válida - Turtle Soup activo, buscando FVG en {self.entry_timeframe}...")
+                        self._last_waiting_log = current_time
             
             return None
             
@@ -207,6 +226,27 @@ class TurtleSoupFVGStrategy(BaseStrategy):
         """
         self._reset_daily_trades_counter()
         return self.trades_today >= self.max_trades_per_day
+    
+    def _price_to_pips(self, price_diff: float, digits: int) -> float:
+        """
+        Convierte una diferencia de precio a pips
+        
+        Args:
+            price_diff: Diferencia de precio (ej: 0.00025)
+            digits: Número de dígitos del símbolo (5 para EURUSD, 3 para USDJPY)
+            
+        Returns:
+            Diferencia en pips
+        """
+        # Para símbolos con 5 dígitos: 1 pip = 0.00010 = 10 points
+        # Para símbolos con 3 dígitos: 1 pip = 0.01 = 1 point
+        if digits == 5:
+            return price_diff * 10000  # Multiplicar por 10000 para convertir a pips
+        elif digits == 3:
+            return price_diff * 100  # Multiplicar por 100 para convertir a pips
+        else:
+            # Por defecto, asumir 5 dígitos
+            return price_diff * 10000
     
     def _is_expected_fvg(self, fvg: Dict, turtle_soup: Dict) -> bool:
         """
@@ -921,7 +961,8 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             if fvg_top is None or fvg_bottom is None or target_price is None:
                 return None
             
-            # Calcular Stop Loss (debe cubrir todo el FVG + margen adicional para retrocesos)
+            # Calcular Stop Loss (debe cubrir TODO el espacio del FVG + margen adicional para soportar movimientos del precio)
+            # El SL debe estar lo suficientemente lejos para que si el precio retrocede y completa el FVG, el SL no se active
             fvg_size = fvg_top - fvg_bottom
             
             # Obtener información del símbolo para calcular spread y distancia mínima
@@ -933,16 +974,59 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             point = symbol_info.point  # Valor de un punto
             spread_price = spread_points * point  # Spread en precio
             
-            # Usar 50% del tamaño del FVG como margen adicional para proteger contra retrocesos
-            # Esto asegura que si el precio retrocede y completa el FVG, el SL no se active
-            safety_margin = fvg_size * 0.5  # 50% adicional más allá del FVG
+            # Para calcular pips correctamente: 1 pip = 10 points para símbolos con 5 dígitos, 1 point para 3 dígitos
+            pips_to_points = 10 if symbol_info.digits == 5 else 1
             
-            # Distancia mínima del SL: spread + margen de seguridad (mínimo 10 pips o 3x el spread, el que sea mayor)
+            # Margen adicional estándar: 100% del tamaño del FVG (aumentado de 50% a 100%)
+            # Esto asegura que el SL cubra el espacio completo del FVG (100%) + un margen adicional igual (100%)
+            # Total: 2.0x el tamaño del FVG para soportar movimientos del precio
+            safety_margin = fvg_size * 1.0  # 100% adicional más allá del FVG
+            
+            # Distancia mínima estándar del SL: debe ser razonable para soportar movimientos del precio
+            # IMPORTANTE: La distancia mínima debe adaptarse a la temporalidad de entrada
+            # - M1: Entradas más ajustadas, SL más corto (15-20 pips)
+            # - M5 o superior: SL más amplio (30-40 pips)
+            fvg_size_pips = fvg_size * (10000 if symbol_info.digits == 5 else 100)
+            
+            # Determinar distancia mínima según temporalidad de entrada
+            entry_tf = self.entry_timeframe.upper()
+            if entry_tf == 'M1':
+                # Para M1: SL más ajustado, pero aún cubriendo el FVG bien
+                if fvg_size_pips < 3:
+                    min_pips = 15  # FVG muy pequeño en M1: 15 pips mínimo
+                elif fvg_size_pips < 5:
+                    min_pips = 18  # FVG pequeño en M1: 18 pips mínimo
+                else:
+                    min_pips = 20  # FVG normal en M1: 20 pips mínimo
+                self.logger.info(f"[{symbol}] 📏 Entrada M1: FVG {fvg_size_pips:.1f} pips → distancia mínima ajustada: {min_pips} pips")
+            else:
+                # Para M5 o superior: SL más amplio
+                if fvg_size_pips < 5:
+                    # FVG muy pequeño (< 5 pips): usar distancia mínima generosa de 40 pips
+                    min_pips = 40
+                    self.logger.info(f"[{symbol}] 📏 FVG pequeño ({fvg_size_pips:.1f} pips) → usando distancia mínima generosa de {min_pips} pips")
+                elif fvg_size_pips < 10:
+                    # FVG pequeño (5-10 pips): usar distancia mínima de 35 pips
+                    min_pips = 35
+                    self.logger.info(f"[{symbol}] 📏 FVG pequeño ({fvg_size_pips:.1f} pips) → usando distancia mínima de {min_pips} pips")
+                else:
+                    # FVG normal o grande (>= 10 pips): usar distancia mínima estándar de 30 pips
+                    min_pips = 30
+                    self.logger.info(f"[{symbol}] 📏 FVG normal ({fvg_size_pips:.1f} pips) → usando distancia mínima estándar de {min_pips} pips")
+            
+            min_sl_distance_pips = min_pips * pips_to_points * point
+            
+            # La distancia mínima debe ser el mayor entre:
+            # 1. 5x el spread (mínimo por spread)
+            # 2. La distancia mínima en pips (30-40 pips según tamaño del FVG)
+            # 3. 2.5x el tamaño del FVG (solo si el FVG es grande, para cubrirlo bien)
             min_sl_distance = max(
-                spread_price * 3,  # 3x el spread como mínimo
-                point * 10,  # Mínimo 10 pips
-                fvg_size * 1.5  # O 1.5x el tamaño del FVG
+                spread_price * 5,  # 5x el spread como mínimo
+                min_sl_distance_pips,  # Mínimo 30-40 pips según tamaño del FVG
+                fvg_size * 2.5  # 2.5x el tamaño del FVG para cubrirlo bien + margen adicional
             )
+            
+            self.logger.info(f"[{symbol}] 📐 Cálculo SL: FVG Size={fvg_size:.5f} ({fvg_size_pips:.1f} pips) | Safety Margin={safety_margin:.5f} ({safety_margin * (10000 if symbol_info.digits == 5 else 100):.1f} pips) | Min Distance={min_sl_distance:.5f} ({min_sl_distance * (10000 if symbol_info.digits == 5 else 100):.1f} pips)")
             
             # ⚡ ORDEN A MERCADO: Usar precio actual del mercado (bid/ask)
             # Para órdenes a mercado, el precio de entrada es el precio actual del mercado
@@ -953,17 +1037,46 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 entry_price = float(tick.ask)
                 self.logger.info(f"[{symbol}] 💹 Entrada a mercado (BUY): Precio ASK actual = {entry_price:.5f}")
                 
-                # SL debajo del FVG con margen adicional
+                # SL debajo del FVG: cubre el espacio completo del FVG + margen adicional estándar
+                # Fórmula: SL = FVG Bottom - (Tamaño del FVG + Margen de seguridad)
+                # Esto asegura que el SL esté a 2.0x el tamaño del FVG debajo del FVG Bottom
+                # Cubriendo así todo el espacio del FVG (100%) + margen adicional igual (100%) = 200% del FVG
+                # Esto soporta mejor los movimientos del precio y evita SL demasiado cortos
                 calculated_sl = fvg_bottom - fvg_size - safety_margin
+                self.logger.info(f"[{symbol}] 📊 SL desde FVG: FVG Bottom={fvg_bottom:.5f} - FVG Size={fvg_size:.5f} - Safety Margin={safety_margin:.5f} = {calculated_sl:.5f}")
                 
                 # Asegurar distancia mínima del SL desde el precio de entrada
                 # El SL debe estar al menos a min_sl_distance del precio de entrada
+                # IMPORTANTE: SIEMPRE usar el MENOR entre el SL calculado y el mínimo requerido (para BUY, SL está abajo)
+                # Esto asegura que el SL tenga una distancia mínima razonable del entry,
+                # incluso cuando el entry está muy cerca del FVG o el FVG es muy pequeño
                 min_sl_price = entry_price - min_sl_distance
                 stop_loss = min(calculated_sl, min_sl_price)
                 
-                # Si tuvimos que ajustar el SL, loguearlo
+                # Calcular distancia final del SL al entry
+                final_sl_distance = abs(entry_price - stop_loss)
+                
+                # Verificar si el SL cubre bien el FVG
+                # El SL debe estar al menos a (FVG Size + Safety Margin) del FVG Bottom
+                sl_to_fvg_bottom = abs(stop_loss - fvg_bottom)
+                required_coverage = fvg_size + safety_margin
+                
+                pips_min = self._price_to_pips(min_sl_distance, symbol_info.digits)
+                pips_final = self._price_to_pips(final_sl_distance, symbol_info.digits)
+                pips_coverage = self._price_to_pips(sl_to_fvg_bottom, symbol_info.digits)
+                pips_required = self._price_to_pips(required_coverage, symbol_info.digits)
+                
                 if stop_loss < calculated_sl:
-                    self.logger.info(f"[{symbol}] ⚠️  SL ajustado por distancia mínima: {calculated_sl:.5f} → {stop_loss:.5f} (mínimo requerido: {min_sl_price:.5f})")
+                    # SL fue ajustado por distancia mínima (más lejos del entry = más seguro)
+                    self.logger.info(f"[{symbol}] ⚠️  SL ajustado por distancia mínima: {calculated_sl:.5f} → {stop_loss:.5f}")
+                    self.logger.info(f"[{symbol}]    Mínimo requerido: {min_sl_price:.5f} | Distancia mínima: {min_sl_distance:.5f} ({pips_min:.1f} pips)")
+                    self.logger.info(f"[{symbol}]    Distancia final del SL al entry: {final_sl_distance:.5f} ({pips_final:.1f} pips)")
+                    self.logger.info(f"[{symbol}]    Cobertura del FVG: {sl_to_fvg_bottom:.5f} ({pips_coverage:.1f} pips) | Requerido: {required_coverage:.5f} ({pips_required:.1f} pips)")
+                else:
+                    # SL calculado cubre el FVG adecuadamente
+                    self.logger.info(f"[{symbol}] ✅ SL calculado cubre FVG adecuadamente: {stop_loss:.5f}")
+                    self.logger.info(f"[{symbol}]    Distancia desde entry: {final_sl_distance:.5f} ({pips_final:.1f} pips)")
+                    self.logger.info(f"[{symbol}]    Cobertura del FVG: {sl_to_fvg_bottom:.5f} ({pips_coverage:.1f} pips) | Requerido: {required_coverage:.5f} ({pips_required:.1f} pips)")
                 
                 take_profit = target_price
                 self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Bottom: {fvg_bottom:.5f} - FVG Size: {fvg_size:.5f} - Safety Margin: {safety_margin:.5f} - Min Distance: {min_sl_distance:.5f})")
@@ -972,17 +1085,46 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 entry_price = float(tick.bid)
                 self.logger.info(f"[{symbol}] 💹 Entrada a mercado (SELL): Precio BID actual = {entry_price:.5f}")
                 
-                # SL arriba del FVG con margen adicional
+                # SL arriba del FVG: cubre el espacio completo del FVG + margen adicional estándar
+                # Fórmula: SL = FVG Top + (Tamaño del FVG + Margen de seguridad)
+                # Esto asegura que el SL esté a 2.0x el tamaño del FVG arriba del FVG Top
+                # Cubriendo así todo el espacio del FVG (100%) + margen adicional igual (100%) = 200% del FVG
+                # Esto soporta mejor los movimientos del precio y evita SL demasiado cortos
                 calculated_sl = fvg_top + fvg_size + safety_margin
+                self.logger.info(f"[{symbol}] 📊 SL desde FVG: FVG Top={fvg_top:.5f} + FVG Size={fvg_size:.5f} + Safety Margin={safety_margin:.5f} = {calculated_sl:.5f}")
                 
                 # Asegurar distancia mínima del SL desde el precio de entrada
                 # El SL debe estar al menos a min_sl_distance del precio de entrada
+                # IMPORTANTE: SIEMPRE usar el MAYOR entre el SL calculado y el mínimo requerido
+                # Esto asegura que el SL tenga una distancia mínima razonable del entry,
+                # incluso cuando el entry está muy cerca del FVG o el FVG es muy pequeño
                 min_sl_price = entry_price + min_sl_distance
                 stop_loss = max(calculated_sl, min_sl_price)
                 
-                # Si tuvimos que ajustar el SL, loguearlo
+                # Calcular distancia final del SL al entry
+                final_sl_distance = abs(entry_price - stop_loss)
+                
+                # Verificar si el SL cubre bien el FVG
+                # El SL debe estar al menos a (FVG Size + Safety Margin) del FVG Top
+                sl_to_fvg_top = abs(stop_loss - fvg_top)
+                required_coverage = fvg_size + safety_margin
+                
+                pips_min = self._price_to_pips(min_sl_distance, symbol_info.digits)
+                pips_final = self._price_to_pips(final_sl_distance, symbol_info.digits)
+                pips_coverage = self._price_to_pips(sl_to_fvg_top, symbol_info.digits)
+                pips_required = self._price_to_pips(required_coverage, symbol_info.digits)
+                
                 if stop_loss > calculated_sl:
-                    self.logger.info(f"[{symbol}] ⚠️  SL ajustado por distancia mínima: {calculated_sl:.5f} → {stop_loss:.5f} (mínimo requerido: {min_sl_price:.5f})")
+                    # SL fue ajustado por distancia mínima (más lejos del entry = más seguro)
+                    self.logger.info(f"[{symbol}] ⚠️  SL ajustado por distancia mínima: {calculated_sl:.5f} → {stop_loss:.5f}")
+                    self.logger.info(f"[{symbol}]    Mínimo requerido: {min_sl_price:.5f} | Distancia mínima: {min_sl_distance:.5f} ({pips_min:.1f} pips)")
+                    self.logger.info(f"[{symbol}]    Distancia final del SL al entry: {final_sl_distance:.5f} ({pips_final:.1f} pips)")
+                    self.logger.info(f"[{symbol}]    Cobertura del FVG: {sl_to_fvg_top:.5f} ({pips_coverage:.1f} pips) | Requerido: {required_coverage:.5f} ({pips_required:.1f} pips)")
+                else:
+                    # SL calculado cubre el FVG adecuadamente
+                    self.logger.info(f"[{symbol}] ✅ SL calculado cubre FVG adecuadamente: {stop_loss:.5f}")
+                    self.logger.info(f"[{symbol}]    Distancia desde entry: {final_sl_distance:.5f} ({pips_final:.1f} pips)")
+                    self.logger.info(f"[{symbol}]    Cobertura del FVG: {sl_to_fvg_top:.5f} ({pips_coverage:.1f} pips) | Requerido: {required_coverage:.5f} ({pips_required:.1f} pips)")
                 
                 take_profit = target_price
                 self.logger.info(f"[{symbol}] 🛑 SL calculado: {stop_loss:.5f} (FVG Top: {fvg_top:.5f} + FVG Size: {fvg_size:.5f} + Safety Margin: {safety_margin:.5f} + Min Distance: {min_sl_distance:.5f})")
@@ -1337,26 +1479,291 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 entry_price = float(tick.bid)  # Venta: precio BID
                 self.logger.info(f"[{symbol}] 💹 Precio de entrada a mercado (SELL): {entry_price:.5f} (BID actual)")
             
-            # Recalcular RIESGO con el precio real de entrada
+            # ⚠️ VERIFICAR Y AJUSTAR SL CON EL PRECIO REAL DE ENTRADA
+            # El SL puede haberse calculado con un precio diferente, asegurar distancia mínima con precio real
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                self.logger.error(f"[{symbol}] ❌ No se pudo obtener información del símbolo")
+                return None
+            
+            point = symbol_info.point
+            spread_points = symbol_info.spread
+            spread_price = spread_points * point
+            
+            # Obtener tamaño del FVG del entry_signal para calcular distancia mínima
+            fvg_info = entry_signal.get('fvg', {})
+            fvg_size = abs(fvg_info.get('fvg_top', 0) - fvg_info.get('fvg_bottom', 0)) if fvg_info else point * 2
+            
+            # Para calcular pips correctamente: 1 pip = 10 points para símbolos con 5 dígitos, 1 point para 3 dígitos
+            pips_to_points = 10 if symbol_info.digits == 5 else 1
+            fvg_size_pips = fvg_size * (10000 if symbol_info.digits == 5 else 100)
+            
+            # Distancia mínima del SL: adaptativa según tamaño del FVG Y temporalidad de entrada
+            # IMPORTANTE: La distancia mínima debe adaptarse a la temporalidad de entrada
+            # - M1: Entradas más ajustadas, SL más corto (15-20 pips)
+            # - M5 o superior: SL más amplio (30-40 pips)
+            entry_tf = self.entry_timeframe.upper()
+            if entry_tf == 'M1':
+                # Para M1: SL más ajustado
+                if fvg_size_pips < 3:
+                    min_pips = 15  # FVG muy pequeño en M1: 15 pips mínimo
+                elif fvg_size_pips < 5:
+                    min_pips = 18  # FVG pequeño en M1: 18 pips mínimo
+                else:
+                    min_pips = 20  # FVG normal en M1: 20 pips mínimo
+            else:
+                # Para M5 o superior: SL más amplio
+                if fvg_size_pips < 5:
+                    # FVG muy pequeño (< 5 pips): usar distancia mínima generosa de 40 pips
+                    min_pips = 40
+                elif fvg_size_pips < 10:
+                    # FVG pequeño (5-10 pips): usar distancia mínima de 35 pips
+                    min_pips = 35
+                else:
+                    # FVG normal o grande (>= 10 pips): usar distancia mínima estándar de 30 pips
+                    min_pips = 30
+            
+            min_sl_distance_pips = min_pips * pips_to_points * point
+            
+            # La distancia mínima debe ser el mayor entre:
+            # 1. 5x el spread (mínimo por spread)
+            # 2. La distancia mínima en pips (30-40 pips según tamaño del FVG)
+            # 3. 2.5x el tamaño del FVG (solo si el FVG es grande, para cubrirlo bien)
+            min_sl_distance = max(
+                spread_price * 5,  # 5x el spread como mínimo
+                min_sl_distance_pips,  # Mínimo 30-40 pips según tamaño del FVG
+                fvg_size * 2.5  # 2.5x el tamaño del FVG para cubrirlo bien + margen adicional
+            )
+            
+            # Verificar distancia actual del SL al entry real
+            current_sl_distance = abs(entry_price - stop_loss)
+            original_sl = stop_loss
+            
+            # Si la distancia es menor que el mínimo, ajustar el SL
+            if current_sl_distance < min_sl_distance:
+                if direction == 'BULLISH':
+                    # Para BUY: SL debe estar debajo del entry
+                    min_sl_price = entry_price - min_sl_distance
+                    if stop_loss > min_sl_price:
+                        stop_loss = min_sl_price
+                        self.logger.warning(
+                            f"[{symbol}] ⚠️  SL ajustado por distancia mínima con precio real: "
+                            f"{original_sl:.5f} → {stop_loss:.5f} | "
+                            f"Distancia anterior: {current_sl_distance:.5f} ({current_sl_distance * 10000:.1f} pips) | "
+                            f"Nueva distancia: {min_sl_distance:.5f} ({min_sl_distance * 10000:.1f} pips)"
+                        )
+                else:
+                    # Para SELL: SL debe estar arriba del entry
+                    min_sl_price = entry_price + min_sl_distance
+                    if stop_loss < min_sl_price:
+                        stop_loss = min_sl_price
+                        self.logger.warning(
+                            f"[{symbol}] ⚠️  SL ajustado por distancia mínima con precio real: "
+                            f"{original_sl:.5f} → {stop_loss:.5f} | "
+                            f"Distancia anterior: {current_sl_distance:.5f} ({current_sl_distance * 10000:.1f} pips) | "
+                            f"Nueva distancia: {min_sl_distance:.5f} ({min_sl_distance * 10000:.1f} pips)"
+                        )
+            else:
+                final_distance = abs(entry_price - stop_loss)
+                pips_final = self._price_to_pips(final_distance, symbol_info.digits)
+                pips_min = self._price_to_pips(min_sl_distance, symbol_info.digits)
+                self.logger.info(
+                    f"[{symbol}] ✅ SL tiene distancia adecuada: {final_distance:.5f} ({pips_final:.1f} pips) >= "
+                    f"mínimo requerido: {min_sl_distance:.5f} ({pips_min:.1f} pips)"
+                )
+            
+            # Recalcular RIESGO con el precio real de entrada y SL ajustado
+            # IMPORTANTE: Mantener el SL ajustado (basado en distancia mínima + FVG)
+            # Solo ajustaremos el TP para mantener el RR de 1:2
             risk = abs(entry_price - stop_loss)
             if risk <= 0:
                 self.logger.error(f"[{symbol}] ❌ Risk calculado 0 o negativo después de ajustar entry_price - Cancelando orden")
                 return None
             
-            # ⚠️ FORZAR RR EXACTO 1:2 CON EL PRECIO REAL
-            # Independientemente de pequeños cambios por slippage, ajustamos TP para que el RR final sea exactamente min_rr (ej: 1:2)
-            max_rr = self.min_rr
-            original_tp = take_profit
-            reward = risk * max_rr
-            if direction == 'BULLISH':
-                take_profit = entry_price + reward
+            # Obtener información del FVG para validaciones (ya calculado arriba en la validación final)
+            if 'calculated_fvg_bottom' in locals() and 'calculated_fvg_top' in locals():
+                fvg_size_calc = abs(calculated_fvg_top - calculated_fvg_bottom)
             else:
-                take_profit = entry_price - reward
+                # Si no está disponible, usar el tamaño del FVG del entry_signal
+                fvg_size_calc = fvg_size
             
-            rr = reward / risk  # Debe ser igual a max_rr
+            point = symbol_info.point  # Precisión del símbolo (ej: 0.00001 para EURUSD)
+            digits = symbol_info.digits  # Dígitos decimales del símbolo (ej: 5 para EURUSD)
+            stop_level = symbol_info.trade_stops_level  # Distancia mínima requerida por el broker
+            min_distance = stop_level * point  # Distancia mínima en precio
+            
+            # ⚠️ FORZAR RR EXACTO 1:2 CON EL PRECIO REAL
+            # Mantenemos el SL original (basado en FVG) y ajustamos el TP para mantener RR exacto de 1:2
+            max_rr = self.min_rr  # 2.0 (1:2)
+            original_tp = take_profit
+            original_sl = stop_loss  # Guardar SL original para referencia
+            
+            # Calcular risk real con el precio de entrada actual
+            risk_actual = abs(entry_price - stop_loss)
+            if risk_actual == 0:
+                self.logger.error(f"[{symbol}] ❌ Risk calculado 0 - Cancelando orden")
+                return None
+            
+            # Calcular reward para RR exacto de 1:2 basado en el risk real
+            reward_target = risk_actual * max_rr  # Reward = Risk * 2.0
+            
+            # Calcular TP forzado con reward que mantiene RR exacto de 1:2
+            if direction == 'BULLISH':
+                take_profit_raw = entry_price + reward_target
+            else:
+                take_profit_raw = entry_price - reward_target
+            
+            # Redondear TP según los digits del símbolo
+            take_profit = round(take_profit_raw, digits)
+            
+            # Recalcular reward real después del redondeo
+            if direction == 'BULLISH':
+                reward_actual = take_profit - entry_price
+            else:
+                reward_actual = entry_price - take_profit
+            
+            # Verificar que el TP redondeado cumpla con la distancia mínima del broker
+            # Si no cumple, ajustar ligeramente pero manteniendo RR lo más cercano a 1:2
+            if direction == 'BULLISH':
+                tp_distance = take_profit - entry_price
+                if tp_distance < min_distance:
+                    # Ajustar TP para cumplir distancia mínima, pero recalcular para mantener RR
+                    take_profit = round(entry_price + min_distance, digits)
+                    reward_actual = take_profit - entry_price
+                    # Si el TP ajustado es mayor que el reward target, mantenerlo (mejor RR)
+                    if reward_actual < reward_target:
+                        # Recalcular TP para mantener RR exacto si es posible
+                        take_profit = round(entry_price + reward_target, digits)
+                        reward_actual = take_profit - entry_price
+            else:
+                tp_distance = entry_price - take_profit
+                if tp_distance < min_distance:
+                    # Ajustar TP para cumplir distancia mínima, pero recalcular para mantener RR
+                    take_profit = round(entry_price - min_distance, digits)
+                    reward_actual = entry_price - take_profit
+                    # Si el TP ajustado es mayor que el reward target, mantenerlo (mejor RR)
+                    if reward_actual < reward_target:
+                        # Recalcular TP para mantener RR exacto si es posible
+                        take_profit = round(entry_price - reward_target, digits)
+                        reward_actual = entry_price - take_profit
+            
+            # Recalcular RR final con TP ajustado y SL original
+            rr = reward_actual / risk_actual  # RR real con TP ajustado y SL original
+            
+            # Log del RR forzado
             self.logger.info(
                 f"[{symbol}] 📈 RR recalculado y FORZADO a {rr:.2f}:1 con precio real | "
-                f"Entry={entry_price:.5f}, SL={stop_loss:.5f}, TP original={original_tp:.5f} → TP ajustado={take_profit:.5f}"
+                f"Entry={entry_price:.5f}, SL={stop_loss:.5f} (Risk: {risk_actual:.5f}), "
+                f"TP original={original_tp:.5f} → TP ajustado={take_profit:.5f} (Reward: {reward_actual:.5f})"
+            )
+            
+            # Verificar que el RR sea al menos el mínimo requerido
+            if rr < (self.min_rr - 0.01):  # Tolerancia de 0.01 para redondeo
+                # Si el RR es menor que el mínimo, solo ajustar ligeramente el SL si es necesario
+                # pero manteniendo una distancia razonable (no demasiado corta)
+                required_reward = risk_actual * max_rr
+                
+                # Verificar si podemos ajustar el TP para cumplir RR sin hacer SL demasiado corto
+                if direction == 'BULLISH':
+                    min_tp = entry_price + min_distance
+                    if required_reward >= min_distance:
+                        # Podemos ajustar TP para cumplir RR
+                        take_profit = round(entry_price + required_reward, digits)
+                        reward_actual = take_profit - entry_price
+                        rr = reward_actual / risk_actual
+                    else:
+                        # El reward requerido es menor que la distancia mínima, usar distancia mínima
+                        take_profit = round(min_tp, digits)
+                        reward_actual = take_profit - entry_price
+                        rr = reward_actual / risk_actual
+                else:
+                    min_tp = entry_price - min_distance
+                    if required_reward >= min_distance:
+                        # Podemos ajustar TP para cumplir RR
+                        take_profit = round(entry_price - required_reward, digits)
+                        reward_actual = entry_price - take_profit
+                        rr = reward_actual / risk_actual
+                    else:
+                        # El reward requerido es menor que la distancia mínima, usar distancia mínima
+                        take_profit = round(min_tp, digits)
+                        reward_actual = entry_price - take_profit
+                        rr = reward_actual / risk_actual
+                
+                # Si después de ajustar el TP el RR aún es menor, verificar si podemos ajustar SL ligeramente
+                # pero solo si no lo hace demasiado corto (mínimo 1.5x el tamaño del FVG)
+                if rr < (self.min_rr - 0.01):
+                    # Obtener información del FVG calculado en la validación final
+                    # (calculated_fvg_bottom y calculated_fvg_top están disponibles en este scope)
+                    if 'calculated_fvg_bottom' in locals() and 'calculated_fvg_top' in locals():
+                        fvg_size = abs(calculated_fvg_top - calculated_fvg_bottom)
+                    else:
+                        # Si no están disponibles, usar el risk actual como referencia
+                        fvg_size = risk_actual
+                    
+                    # Calcular distancia mínima razonable del SL
+                    # No hacer el SL demasiado corto: mínimo 1.5x el tamaño del FVG o 80% del risk actual
+                    min_sl_distance_reasonable = max(
+                        fvg_size_calc * 1.5,  # Mínimo 1.5x el tamaño del FVG
+                        min_distance * 2,  # O 2x la distancia mínima del broker
+                        risk_actual * 0.8  # O 80% del risk actual (no hacer SL demasiado corto)
+                    )
+                    
+                    self.logger.info(
+                        f"[{symbol}] ⚠️  Ajustando SL para mantener RR mínimo | "
+                        f"Distancia mínima razonable del SL: {min_sl_distance_reasonable:.5f} | "
+                        f"FVG size: {fvg_size_calc:.5f}"
+                    )
+                    
+                    # Calcular nuevo SL que mantenga distancia razonable
+                    # IMPORTANTE: Solo ajustar el SL si es necesario y manteniendo distancia razonable
+                    # No hacer el SL demasiado corto (más cercano al entry)
+                    if direction == 'BULLISH':
+                        new_sl = entry_price - min_sl_distance_reasonable
+                        # Para BUY: SL debe estar debajo del entry
+                        # Solo ajustar si el nuevo SL está más lejos (más abajo) que el original
+                        # Esto aumenta el risk y permite mantener RR de 1:2
+                        if new_sl < stop_loss:  # new_sl más abajo = más lejos = más risk
+                            stop_loss = round(new_sl, digits)
+                            risk_actual = abs(entry_price - stop_loss)
+                            # Recalcular TP para mantener RR
+                            reward_actual = risk_actual * max_rr
+                            take_profit = round(entry_price + reward_actual, digits)
+                            reward_actual = take_profit - entry_price
+                            rr = reward_actual / risk_actual
+                            self.logger.info(
+                                f"[{symbol}] ⚠️  SL ajustado para mantener RR mínimo: "
+                                f"SL original={original_sl:.5f} → SL ajustado={stop_loss:.5f} | "
+                                f"Distancia razonable: {min_sl_distance_reasonable:.5f}"
+                            )
+                    else:
+                        new_sl = entry_price + min_sl_distance_reasonable
+                        # Para SELL: SL debe estar arriba del entry
+                        # Solo ajustar si el nuevo SL está más lejos (más arriba) que el original
+                        # Esto aumenta el risk y permite mantener RR de 1:2
+                        if new_sl > stop_loss:  # new_sl más arriba = más lejos = más risk
+                            stop_loss = round(new_sl, digits)
+                            risk_actual = abs(entry_price - stop_loss)
+                            # Recalcular TP para mantener RR
+                            reward_actual = risk_actual * max_rr
+                            take_profit = round(entry_price - reward_actual, digits)
+                            reward_actual = entry_price - take_profit
+                            rr = reward_actual / risk_actual
+                            self.logger.info(
+                                f"[{symbol}] ⚠️  SL ajustado para mantener RR mínimo: "
+                                f"SL original={original_sl:.5f} → SL ajustado={stop_loss:.5f} | "
+                                f"Distancia razonable: {min_sl_distance_reasonable:.5f}"
+                            )
+                    
+                    if rr < (self.min_rr - 0.01):
+                        self.logger.error(
+                            f"[{symbol}] ❌ ERROR: No se pudo alcanzar RR mínimo ({self.min_rr:.2f}) manteniendo SL razonable | "
+                            f"RR final: {rr:.2f} | Cancelando orden"
+                        )
+                        return None
+            
+            self.logger.info(
+                f"[{symbol}] 📈 RR recalculado y FORZADO a {rr:.2f}:1 con precio real | "
+                f"Entry={entry_price:.5f}, SL={stop_loss:.5f} (original: {original_sl:.5f}), TP original={original_tp:.5f} → TP ajustado={take_profit:.5f} (redondeado según digits={digits})"
             )
             
             # Crear diccionario FVG con la información calculada y validada
@@ -1384,7 +1791,24 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             self.logger.info(f"[{symbol}] 💰 Precio de Entrada: {entry_price:.5f}")
             self.logger.info(f"[{symbol}] 🛑 Stop Loss: {stop_loss:.5f} (Risk: {entry_signal.get('risk', 0):.5f})")
             self.logger.info(f"[{symbol}] 🎯 Take Profit: {take_profit:.5f} (Reward: {entry_signal.get('reward', 0):.5f})")
-            self.logger.info(f"[{symbol}] 📈 Risk/Reward: {rr:.2f}:1 (mínimo requerido: {self.min_rr}:1)")
+            # Log final del RR con detalles
+            risk_pips = self._price_to_pips(risk_actual, symbol_info.digits)
+            reward_pips = self._price_to_pips(reward_actual, symbol_info.digits)
+            self.logger.info(
+                f"[{symbol}] 📈 Risk/Reward FINAL: {rr:.2f}:1 (objetivo: {self.min_rr}:1) | "
+                f"Risk: {risk_actual:.5f} ({risk_pips:.1f} pips) | "
+                f"Reward: {reward_actual:.5f} ({reward_pips:.1f} pips)"
+            )
+            
+            # Verificar que el RR sea exactamente 2.0:1 (con pequeña tolerancia por redondeo)
+            if abs(rr - self.min_rr) > 0.05:  # Tolerancia de 0.05 para redondeo
+                self.logger.warning(
+                    f"[{symbol}] ⚠️  RR ({rr:.2f}:1) difiere del objetivo ({self.min_rr}:1) | "
+                    f"Diferencia: {abs(rr - self.min_rr):.2f} | "
+                    f"Esto puede deberse a redondeo del broker o restricciones de stop level"
+                )
+            else:
+                self.logger.info(f"[{symbol}] ✅ RR exacto de {self.min_rr}:1 logrado exitosamente")
             self.logger.info(f"[{symbol}] 📦 Volumen: {volume:.2f} lotes (calculado por {self.risk_per_trade_percent}% de riesgo)")
             self.logger.info(f"[{symbol}] {'-'*70}")
             self.logger.info(f"[{symbol}] 📋 Contexto de la Señal:")

@@ -3,8 +3,8 @@
 
 # Credenciales MT5
 mt5:
-  login: 1520857747  # Número de cuenta MT5
-  password: "T@7$ykEuL3"  # Master password (para trading)
+  login: 1520929711  # Número de cuenta MT5
+  password: "iTPN*h$3$?pA*"  # Master password (para trading)
   server: "FTMO-Demo2"  # Servidor del broker
   path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"  # Ruta a MT5 (opcional, dejar vacío si MT5 está en PATH)
 
@@ -23,10 +23,37 @@ trading_hours:
   end_time: "23:59"    # Hora de fin (formato HH:MM) - 12 de la noche (hasta antes de medianoche)
   timezone: "America/New_York"  # Zona horaria
 
-# Estrategia activa
+# Estrategia activa (modo simple - se usa si strategy_schedule.enabled = false)
 strategy:
   name: "turtle_soup_fvg"  # Nombre de la estrategia a usar
   # Estrategias disponibles: "default", "turtle_soup_fvg"
+
+# Sistema de estrategias por jornada (NUEVO - opcional)
+# Si enabled = true, se usa este sistema en lugar de strategy.name
+strategy_schedule:
+  enabled: false  # Cambiar a true para habilitar estrategias por jornada
+  timezone: "America/New_York"  # Zona horaria para los horarios de sesiones
+  sessions:
+    # Ejemplo: Sesión de mañana
+    - name: "Sesión Mañana"
+      start_time: "09:00"
+      end_time: "12:00"
+      strategy: "turtle_soup_fvg"
+      description: "Estrategia Turtle Soup para sesión de mañana"
+    
+    # Ejemplo: Sesión de tarde
+    - name: "Sesión Tarde"
+      start_time: "12:00"
+      end_time: "16:00"
+      strategy: "default"
+      description: "Estrategia por defecto para sesión de tarde"
+    
+    # Ejemplo: Sesión nocturna
+    - name: "Sesión Noche"
+      start_time: "16:00"
+      end_time: "23:59"
+      strategy: "turtle_soup_fvg"
+      description: "Estrategia Turtle Soup para sesión nocturna"
   
 # Configuración específica de estrategia
 strategy_config:
