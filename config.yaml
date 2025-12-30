@@ -1,97 +1,70 @@
-# Configuración del Bot de Trading
-# ===================================
-
-# Credenciales MT5
 mt5:
-  login: 1520929711  # Número de cuenta MT5
-  password: "iTPN*h$3$?pA*"  # Master password (para trading)
-  server: "FTMO-Demo2"  # Servidor del broker
-  path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"  # Ruta a MT5 (opcional, dejar vacío si MT5 está en PATH)
-
-# Activos a operar
+  login: 1520929711
+  password: iTPN*h$3$?pA*
+  server: FTMO-Demo2
+  path: C:\Program Files\MetaTrader 5\terminal64.exe
 symbols:
-  - "EURUSD"
-  # Agregar más activos según necesites
-  # - "GBPUSD"
-  # - "USDJPY"
-  # - "AUDUSD"
-
-# Horario operativo (horario de Nueva York - ET/EST)
+- EURUSD
 trading_hours:
   enabled: true
-  start_time: "09:00"  # Hora de inicio (formato HH:MM)
-  end_time: "23:59"    # Hora de fin (formato HH:MM) - 12 de la noche (hasta antes de medianoche)
-  timezone: "America/New_York"  # Zona horaria
-
-# Estrategia activa (modo simple - se usa si strategy_schedule.enabled = false)
+  start_time: 09:00
+  end_time: '23:59'
+  timezone: America/New_York
 strategy:
-  name: "turtle_soup_fvg"  # Nombre de la estrategia a usar
-  # Estrategias disponibles: "default", "turtle_soup_fvg"
-
-# Sistema de estrategias por jornada (NUEVO - opcional)
-# Si enabled = true, se usa este sistema en lugar de strategy.name
+  name: turtle_soup_fvg
 strategy_schedule:
-  enabled: false  # Cambiar a true para habilitar estrategias por jornada
-  timezone: "America/New_York"  # Zona horaria para los horarios de sesiones
+  enabled: false
+  timezone: America/New_York
   sessions:
-    # Ejemplo: Sesión de mañana
-    - name: "Sesión Mañana"
-      start_time: "09:00"
-      end_time: "12:00"
-      strategy: "turtle_soup_fvg"
-      description: "Estrategia Turtle Soup para sesión de mañana"
-    
-    # Ejemplo: Sesión de tarde
-    - name: "Sesión Tarde"
-      start_time: "12:00"
-      end_time: "16:00"
-      strategy: "default"
-      description: "Estrategia por defecto para sesión de tarde"
-    
-    # Ejemplo: Sesión nocturna
-    - name: "Sesión Noche"
-      start_time: "16:00"
-      end_time: "23:59"
-      strategy: "turtle_soup_fvg"
-      description: "Estrategia Turtle Soup para sesión nocturna"
-  
-# Configuración específica de estrategia
+  - name: Sesión Mañana
+    start_time: 09:00
+    end_time: '12:00'
+    strategy: turtle_soup_fvg
+    description: Estrategia Turtle Soup FVG para sesión de mañana
+  - name: Sesión Tarde
+    start_time: '12:00'
+    end_time: '16:00'
+    strategy: turtle_soup_fvg
+    description: Estrategia Turtle Soup FVG para sesión de tarde
+  - name: Sesión Noche
+    start_time: '16:00'
+    end_time: '23:59'
+    strategy: turtle_soup_fvg
+    description: Estrategia Turtle Soup FVG para sesión nocturna
 strategy_config:
-  entry_timeframe: "M1"  # Temporalidad de entrada: "M1" o "M5" (o superior)
-  min_rr: 2.0  # Risk/Reward mínimo (1:2)
-
-# Configuración de riesgo
+  crt_high_timeframe: H4
+  crt_entry_timeframe: M15
+  crt_use_vayas: false
+  crt_use_fvg_entry: true
+  crt_flexible_rr: true
+  crt_rr_tolerance: 0.2
+  crt_lookback: 5
+  min_rr: 2.0
+  entry_timeframe: M1
 risk_management:
-  risk_per_trade_percent: 1.0  # Porcentaje de riesgo por trade (ej: 1.0 = 1% de la cuenta) - IMPORTANTE: El volumen se calcula automáticamente basado en este %
-  max_trades_per_day: 2        # Máximo de trades por día
-  max_position_size: 10.0      # Tamaño máximo de posición (lots) - límite de seguridad (solo referencia, no restrictivo)
-  stop_loss_pips: 50           # Stop loss en pips (legacy, no se usa si se calcula por riesgo)
-  take_profit_pips: 100        # Take profit en pips (legacy, no se usa si se calcula por riesgo)
-  close_day_on_first_tp: true  # Si la primera entrada cierra con TP, cerrar el día operativo (no colocar más órdenes hasta próxima sesión)
-
-# Configuración de monitoreo de posiciones
+  risk_per_trade_percent: 1.0
+  max_trades_per_day: 2
+  max_position_size: 10.0
+  stop_loss_pips: 50
+  take_profit_pips: 100
+  close_day_on_first_tp: true
 position_monitoring:
-  enabled: true  # Habilitar monitoreo automático de posiciones
+  enabled: true
   trailing_stop:
-    enabled: true  # Habilitar trailing stop loss
-    trigger_percent: 0.70  # Porcentaje del movimiento para activar trailing (0.70 = 70%)
-    sl_percent: 0.50  # Porcentaje donde mover el SL cuando se activa (0.50 = 50%)
+    enabled: true
+    trigger_percent: 0.7
+    sl_percent: 0.5
   auto_close:
-    enabled: true  # Habilitar cierre automático
-    time: "16:50"  # Hora de cierre automático (formato HH:MM) - 4:50 PM hora de Nueva York
-    timezone: "America/New_York"  # Zona horaria para el cierre automático
-
-# Configuración de base de datos
+    enabled: true
+    time: '16:50'
+    timezone: America/New_York
 database:
-  enabled: true  # Habilitar guardado en base de datos
-  server: "18.224.8.184"
-  database: "DbBotTrading"
-  username: "csenterprise"
-  password: "Med@s0ft7622"
-  driver: "ODBC Driver 17 for SQL Server"  # Driver ODBC para SQL Server (ajustar según sistema)
-
-# Configuración general
+  enabled: true
+  server: 18.224.8.184
+  database: DbBotTrading
+  username: csenterprise
+  password: Med@s0ft7622
+  driver: ODBC Driver 17 for SQL Server
 general:
-  timeframe: "M15"  # Timeframe para análisis (M1, M5, M15, M30, H1, H4, D1)
-  log_level: "INFO"  # Nivel de logging (DEBUG, INFO, WARNING, ERROR)
-
+  timeframe: M15
+  log_level: INFO

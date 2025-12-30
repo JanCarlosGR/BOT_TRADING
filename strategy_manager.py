@@ -241,26 +241,45 @@ class BaseStrategy:
     
     def _has_open_positions(self, symbol: str) -> bool:
         """
-        Verifica si hay posiciones abiertas para el símbolo dado
+        Verifica si hay posiciones abiertas para el símbolo dado (SOLO DEL DÍA ACTUAL)
         
         Esta verificación usa la base de datos como fuente de verdad principal,
         y también verifica MT5 para sincronización. Una estrategia no puede colocar
         una nueva entrada mientras hay una posición activa en proceso.
         
+        IMPORTANTE: Solo considera posiciones abiertas el día actual. Las órdenes
+        de días anteriores se ignoran.
+        
         Args:
             symbol: Símbolo a verificar (ej: 'EURUSD')
             
         Returns:
-            True si hay posiciones abiertas, False si no hay posiciones
+            True si hay posiciones abiertas del día actual, False si no hay posiciones
         """
         try:
-            # Primero verificar en base de datos (fuente de verdad)
+            from datetime import datetime, date
+            from pytz import timezone as tz
+            
+            # Obtener fecha actual (usar timezone NY para consistencia con PositionMonitor)
+            # Intentar obtener timezone desde config, sino usar NY por defecto
+            try:
+                auto_close_config = self.config.get('position_monitoring', {}).get('auto_close', {})
+                timezone_str = auto_close_config.get('timezone', 'America/New_York')
+                ny_tz = tz(timezone_str)
+            except:
+                ny_tz = tz('America/New_York')
+            
+            now_ny = datetime.now(ny_tz)
+            today_ny = now_ny.date()
+            
+            # Primero verificar en base de datos (fuente de verdad) - SOLO DEL DÍA ACTUAL
             db_manager = self._get_db_manager()
             if db_manager.enabled:
-                db_orders = db_manager.get_open_orders(symbol=symbol)
+                # get_open_orders ya filtra por today_only=True por defecto
+                db_orders = db_manager.get_open_orders(symbol=symbol, today_only=True)
                 if db_orders:
                     self.logger.info(
-                        f"[{symbol}] ⏸️  Hay {len(db_orders)} orden(es) abierta(s) en BD - "
+                        f"[{symbol}] ⏸️  Hay {len(db_orders)} orden(es) abierta(s) del día actual en BD - "
                         f"No se puede colocar nueva entrada hasta que se cierre(n)"
                     )
                     for order in db_orders:
@@ -272,24 +291,83 @@ class BaseStrategy:
                     return True
             
             # Si BD no está disponible o no hay órdenes, verificar MT5 directamente
+            # PERO filtrar solo las del día actual
             executor = self._get_order_executor()
-            positions = executor.get_positions(symbol=symbol)
-            has_positions = len(positions) > 0
+            all_positions = executor.get_positions(symbol=symbol)
+            
+            # Filtrar solo posiciones del día actual
+            today_positions = []
+            for position in all_positions:
+                position_time = position.get('time')
+                if position_time:
+                    try:
+                        if isinstance(position_time, datetime):
+                            # Convertir a timezone NY
+                            if position_time.tzinfo is None:
+                                position_time_utc = tz('UTC').localize(position_time)
+                                position_time_ny = position_time_utc.astimezone(ny_tz)
+                            else:
+                                position_time_ny = position_time.astimezone(ny_tz)
+                            
+                            position_date = position_time_ny.date()
+                            if position_date == today_ny:
+                                today_positions.append(position)
+                    except Exception as e:
+                        # Si hay error al procesar fecha, incluir por seguridad
+                        self.logger.debug(f"[{symbol}] Error al procesar fecha de posición {position.get('ticket')}: {e}")
+                        today_positions.append(position)
+                else:
+                    # Si no hay fecha, intentar desde BD como respaldo
+                    if db_manager.enabled:
+                        ticket = position.get('ticket')
+                        try:
+                            cursor = db_manager.connection.cursor()
+                            query = "SELECT CreatedAt FROM Orders WHERE Ticket = ?"
+                            cursor.execute(query, (ticket,))
+                            row = cursor.fetchone()
+                            cursor.close()
+                            
+                            if row and row[0]:
+                                created_at = row[0]
+                                if isinstance(created_at, datetime):
+                                    if created_at.tzinfo is None:
+                                        created_at_utc = tz('UTC').localize(created_at)
+                                        created_at_ny = created_at_utc.astimezone(ny_tz)
+                                    else:
+                                        created_at_ny = created_at.astimezone(ny_tz)
+                                    
+                                    if created_at_ny.date() == today_ny:
+                                        today_positions.append(position)
+                        except:
+                            # En caso de error, incluir por seguridad
+                            today_positions.append(position)
+                    else:
+                        # BD no disponible y no hay fecha, incluir por seguridad
+                        today_positions.append(position)
+            
+            has_positions = len(today_positions) > 0
             
             if has_positions:
                 self.logger.info(
-                    f"[{symbol}] ⏸️  Hay {len(positions)} posición(es) abierta(s) en MT5 - "
+                    f"[{symbol}] ⏸️  Hay {len(today_positions)} posición(es) abierta(s) del día actual en MT5 - "
                     f"No se puede colocar nueva entrada hasta que se cierre(n)"
                 )
                 # Sincronizar BD con MT5
                 if db_manager.enabled:
-                    db_manager.sync_orders_with_mt5(positions)
-                for pos in positions:
+                    db_manager.sync_orders_with_mt5(today_positions)
+                for pos in today_positions:
                     self.logger.debug(
                         f"[{symbol}]    • Ticket: {pos['ticket']}, "
                         f"Tipo: {pos['type']}, Volumen: {pos['volume']}, "
                         f"Precio: {pos['price_open']:.5f}"
                     )
+            elif len(all_positions) > 0:
+                # Hay posiciones pero no son del día actual
+                self.logger.debug(
+                    f"[{symbol}] 📅 Hay {len(all_positions)} posición(es) abierta(s) en MT5, "
+                    f"pero {len(all_positions) - len(today_positions)} son de día(s) anterior(es) - "
+                    f"Ignoradas (solo se consideran órdenes del día actual)"
+                )
             
             return has_positions
             

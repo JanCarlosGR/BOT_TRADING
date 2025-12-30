@@ -275,27 +275,71 @@ class TradingBot:
     
     def _has_open_positions(self) -> bool:
         """
-        Verifica si hay posiciones abiertas (rápido, sin loguear)
+        Verifica si hay posiciones abiertas del día actual (rápido, sin loguear)
+        
+        IMPORTANTE: Solo considera posiciones del día actual. Las órdenes de días
+        anteriores se ignoran completamente.
         
         Returns:
-            True si hay posiciones abiertas, False si no hay
+            True si hay posiciones abiertas del día actual, False si no hay
         """
         try:
             if not self.mt5_connected:
                 return False
             
-            positions = mt5.positions_get()
-            if positions is None:
+            all_positions = mt5.positions_get()
+            if all_positions is None:
                 return False
             
-            has_pos = len(positions) > 0
+            # Filtrar solo posiciones del día actual usando PositionMonitor
+            # Obtener timezone de NY para consistencia
+            try:
+                auto_close_config = self.config.get('position_monitoring', {}).get('auto_close', {})
+                timezone_str = auto_close_config.get('timezone', 'America/New_York')
+                from pytz import timezone as tz
+                ny_tz = tz(timezone_str)
+            except:
+                from pytz import timezone as tz
+                ny_tz = tz('America/New_York')
+            
+            now_ny = datetime.now(ny_tz)
+            today_ny = now_ny.date()
+            
+            # Filtrar posiciones del día actual
+            today_positions = []
+            for pos in all_positions:
+                try:
+                    # Obtener fecha de creación desde MT5
+                    pos_time = datetime.fromtimestamp(pos.time)
+                    if pos_time.tzinfo is None:
+                        pos_time_utc = tz('UTC').localize(pos_time)
+                        pos_time_ny = pos_time_utc.astimezone(ny_tz)
+                    else:
+                        pos_time_ny = pos_time.astimezone(ny_tz)
+                    
+                    if pos_time_ny.date() == today_ny:
+                        today_positions.append(pos)
+                except Exception as e:
+                    # Si hay error al procesar fecha, incluir por seguridad
+                    self.logger.debug(f"Error al procesar fecha de posición {pos.ticket}: {e}")
+                    today_positions.append(pos)
+            
+            has_pos = len(today_positions) > 0
             
             # Log de diagnóstico ocasional (cada 60 segundos máximo)
             if has_pos:
                 if not hasattr(self, '_last_position_check_log'):
                     self._last_position_check_log = 0
                 if (time_module.time() - self._last_position_check_log) >= 60:
-                    self.logger.debug(f"✅ Detectadas {len(positions)} posición(es) abierta(s) en MT5")
+                    total_count = len(all_positions)
+                    today_count = len(today_positions)
+                    if total_count > today_count:
+                        self.logger.debug(
+                            f"✅ Detectadas {today_count} posición(es) del día actual en MT5 "
+                            f"(de {total_count} total, {total_count - today_count} excluidas por ser de día(s) anterior(es))"
+                        )
+                    else:
+                        self.logger.debug(f"✅ Detectadas {today_count} posición(es) abierta(s) del día actual en MT5")
                     self._last_position_check_log = time_module.time()
             
             return has_pos
@@ -484,25 +528,26 @@ class TradingBot:
                             self.db_manager.sync_orders_with_mt5(mt5_positions)
                         self._last_sync_warning_log = time_module.time()
                 
-                # Si hay posiciones abiertas, priorizar monitoreo sobre análisis
+                # Si hay posiciones abiertas del día actual, priorizar monitoreo sobre análisis
                 if has_open_positions:
-                    # Log inmediato cuando detecta posiciones abiertas (cada 5 segundos)
+                    # Log inmediato cuando detecta posiciones abiertas del día actual (cada 5 segundos)
                     if not hasattr(self, '_last_position_detected_log'):
                         self._last_position_detected_log = 0
                     if (time_module.time() - self._last_position_detected_log) >= 5:
                         self.logger.warning(
-                            f"🛑 POSICIONES ABIERTAS DETECTADAS - "
+                            f"🛑 POSICIONES ABIERTAS DEL DÍA ACTUAL DETECTADAS - "
                             f"MT5: {has_mt5_positions}, BD: {has_db_orders} - "
                             f"PRIORIZANDO MONITOREO - NO ANALIZANDO"
                         )
                         self._last_position_detected_log = time_module.time()
                     # Monitoreo activo: verificar cada 5 segundos (más frecuente)
+                    # open_count_mt5 ya viene filtrado del PositionMonitor (solo día actual)
                     open_count_mt5 = monitor_result.get('open_count', 0) if isinstance(monitor_result, dict) else 0
                     
-                    # Obtener conteo desde BD también
+                    # Obtener conteo desde BD también (ya filtra por día actual por defecto)
                     open_count_db = 0
                     if self.db_manager.enabled:
-                        db_orders = self.db_manager.get_open_orders()
+                        db_orders = self.db_manager.get_open_orders(today_only=True)
                         open_count_db = len(db_orders) if db_orders else 0
                     
                     # Mostrar mensaje de monitoreo cada 30 segundos para no saturar logs
@@ -512,7 +557,7 @@ class TradingBot:
                     if (time_module.time() - self._last_monitor_log) >= 30:
                         total_count = max(open_count_mt5, open_count_db)  # Usar el mayor
                         self.logger.info(
-                            f"🔄 Monitoreando {total_count} posición(es) abierta(s) "
+                            f"🔄 Monitoreando {total_count} posición(es) abierta(s) DEL DÍA ACTUAL "
                             f"(MT5: {open_count_mt5}, BD: {open_count_db}) - "
                             f"Priorizando monitoreo sobre análisis"
                         )
@@ -659,7 +704,103 @@ class TradingBot:
         self.logger.info("Bot finalizado correctamente")
 
 
+def select_strategy_interactive(config_path: str = "config.yaml") -> str:
+    """
+    Muestra un menú interactivo para seleccionar la estrategia
+    
+    Args:
+        config_path: Ruta al archivo de configuración
+        
+    Returns:
+        Nombre de la estrategia seleccionada
+    """
+    # Cargar configuración para obtener estrategias disponibles
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        print(f"Error al cargar configuración: {e}")
+        return "turtle_soup_fvg"  # Default
+    
+    # Estrategias disponibles con descripciones
+    strategies_info = {
+        '1': {
+            'name': 'turtle_soup_fvg',
+            'description': 'Turtle Soup H4 + FVG (Sopa de Tortuga)'
+        },
+        '2': {
+            'name': 'crt_strategy',
+            'description': 'CRT Strategy (Detecta automáticamente: Revisión, Continuación o Extremo)'
+        },
+        '3': {
+            'name': 'default',
+            'description': 'Default Strategy (Estrategia por defecto)'
+        }
+    }
+    
+    # Obtener estrategia actual del config
+    current_strategy = config.get('strategy', {}).get('name', 'turtle_soup_fvg')
+    
+    print("\n" + "=" * 60)
+    print("🤖 BOT DE TRADING - Selección de Estrategia")
+    print("=" * 60)
+    print(f"\n📋 Estrategia actual en config: {current_strategy}")
+    print("\nEstrategias disponibles:")
+    print("-" * 60)
+    print("  📌 RECOMENDADO: Opción 2 (CRT Strategy) detecta automáticamente")
+    print("     cualquiera de los 3 tipos: Revisión, Continuación o Extremo")
+    print("-" * 60)
+    
+    for key, info in strategies_info.items():
+        marker = " ← ACTUAL" if info['name'] == current_strategy else ""
+        print(f"  {key}. {info['description']}{marker}")
+    
+    print("-" * 60)
+    print("  0. Usar estrategia del config (no cambiar)")
+    print("=" * 60)
+    
+    while True:
+        try:
+            choice = input("\n👉 Selecciona una opción (0-3): ").strip()
+            
+            if choice == '0':
+                # Usar la estrategia del config sin cambiar
+                print(f"✅ Usando estrategia del config: {current_strategy}")
+                return current_strategy
+            
+            if choice in strategies_info:
+                selected = strategies_info[choice]
+                print(f"✅ Estrategia seleccionada: {selected['description']}")
+                
+                # Actualizar el config con la estrategia seleccionada
+                if 'strategy' not in config:
+                    config['strategy'] = {}
+                config['strategy']['name'] = selected['name']
+                
+                # Guardar el config actualizado
+                try:
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                    print(f"💾 Configuración actualizada en {config_path}")
+                except Exception as e:
+                    print(f"⚠️  Advertencia: No se pudo guardar la configuración: {e}")
+                    print(f"   La estrategia se usará solo para esta sesión")
+                
+                return selected['name']
+            else:
+                print("❌ Opción inválida. Por favor selecciona un número del 0 al 3.")
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Operación cancelada. Usando estrategia del config.")
+            return current_strategy
+        except Exception as e:
+            print(f"❌ Error: {e}. Intenta de nuevo.")
+
+
 if __name__ == "__main__":
+    # Mostrar menú de selección de estrategia
+    selected_strategy = select_strategy_interactive()
+    
+    # Inicializar y ejecutar el bot
     bot = TradingBot()
     bot.run()
 

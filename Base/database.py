@@ -578,13 +578,14 @@ class DatabaseManager:
             self.logger.error(f"Error al obtener orden {ticket}: {e}", exc_info=True)
             return None
     
-    def get_open_orders(self, symbol: Optional[str] = None, strategy: Optional[str] = None) -> List[Dict]:
+    def get_open_orders(self, symbol: Optional[str] = None, strategy: Optional[str] = None, today_only: bool = True) -> List[Dict]:
         """
         Obtiene las órdenes abiertas desde la base de datos
         
         Args:
             symbol: Filtrar por símbolo (opcional)
             strategy: Filtrar por estrategia (opcional)
+            today_only: Si True, solo retorna órdenes del día actual (default: True)
             
         Returns:
             Lista de diccionarios con información de órdenes abiertas
@@ -602,6 +603,7 @@ class DatabaseManager:
             
             # Consultar órdenes con Status = 'OPEN' (case insensitive y sin espacios)
             # Filtrar explícitamente por Status = 'OPEN' y asegurar que no estén cerradas
+            # IMPORTANTE: Solo incluir órdenes del día actual por defecto
             query = """
                 SELECT Ticket, Symbol, OrderType, EntryPrice, Volume, StopLoss, TakeProfit, Strategy, Status, CreatedAt 
                 FROM Orders 
@@ -609,6 +611,12 @@ class DatabaseManager:
                   AND (ClosedAt IS NULL OR ClosedAt = '')
             """
             params = []
+            
+            # Filtrar por fecha del día actual si today_only es True
+            if today_only:
+                today = date.today()
+                query += " AND CONVERT(DATE, CreatedAt) = ?"
+                params.append(today)
             
             if symbol:
                 query += " AND Symbol = ?"

@@ -7,7 +7,7 @@ Monitorea y gestiona posiciones abiertas en MT5 con:
 
 import logging
 import time as time_module
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import List, Dict, Optional, Tuple
 import MetaTrader5 as mt5
 from pytz import timezone as tz
@@ -66,6 +66,7 @@ class PositionMonitor:
                 log_msg += f" - Trailing Stop: {self.trailing_trigger_percent*100:.0f}% → {self.trailing_sl_percent*100:.0f}%"
             if self.auto_close_enabled:
                 log_msg += f" - Cierre automático: {self.close_time_str} ({self.close_timezone_str})"
+            log_msg += " - Solo monitoreando órdenes del día actual"
             self.logger.info(log_msg)
         else:
             self.logger.info("PositionMonitor deshabilitado en configuración")
@@ -95,38 +96,48 @@ class PositionMonitor:
                 }
             
             # Obtener todas las posiciones abiertas desde MT5
-            positions = self.executor.get_positions()
+            all_positions = self.executor.get_positions()
             
             # Sincronizar BD con MT5 (marcar como cerradas las órdenes que ya no están abiertas en MT5)
             # IMPORTANTE: Hacer esto ANTES de verificar cierre automático para asegurar sincronización
             if self.db_manager.enabled:
-                sync_result = self.db_manager.sync_orders_with_mt5(positions)
+                sync_result = self.db_manager.sync_orders_with_mt5(all_positions)
                 if sync_result.get('closed', 0) > 0:
                     self.logger.info(f"🔄 Sincronización BD-MT5: {sync_result['closed']} orden(es) marcada(s) como cerrada(s)")
             
-            # Si después de sincronizar no hay posiciones, retornar
-            if not positions:
-                # Actualizar lista de posiciones después de sincronización
-                positions = self.executor.get_positions()
+            # Filtrar solo las posiciones del día actual
+            positions = self._filter_today_positions(all_positions)
             
+            # Si después de sincronizar y filtrar no hay posiciones del día, retornar
             if not positions:
+                # Log ocasional si hay posiciones de días anteriores (cada 60 segundos)
+                if all_positions:
+                    if not hasattr(self, '_last_old_positions_log') or (time_module.time() - getattr(self, '_last_old_positions_log', 0)) >= 60:
+                        old_count = len(all_positions) - len(positions)
+                        self.logger.info(
+                            f"📅 Filtrado de posiciones: {len(all_positions)} posición(es) abierta(s) en total, "
+                            f"{old_count} de día(s) anterior(es) (no monitoreadas), "
+                            f"{len(positions)} del día actual"
+                        )
+                        self._last_old_positions_log = time_module.time()
+                
                 return {
                     'success': True,
-                    'message': 'No hay posiciones abiertas',
+                    'message': 'No hay posiciones abiertas del día actual',
                     'actions': [],
                     'open_count': 0
                 }
             
             actions = []
             
-            # 1. PRIORIDAD: Verificar cierre automático por hora (4:50 PM NY)
-            # Esto debe ejecutarse SIEMPRE y con PRIORIDAD sobre cualquier otra operación
             if self.auto_close_enabled:
                 close_action = self._check_auto_close_time(positions)
                 if close_action:
                     actions.append(close_action)
                     # Actualizar lista de posiciones después de intentar cerrar
-                    remaining_positions = self.executor.get_positions()
+                    all_remaining_positions = self.executor.get_positions()
+                    # Filtrar solo las del día actual
+                    remaining_positions = self._filter_today_positions(all_remaining_positions)
                     
                     # Si cerramos algunas posiciones, loguearlo
                     if close_action.get('closed_count', 0) > 0:
@@ -134,7 +145,7 @@ class PositionMonitor:
                             f"✅ Cierre automático (4:50 PM NY): {close_action['closed_count']} posición(es) cerrada(s)"
                         )
                     
-                    # Si aún hay posiciones pendientes, continuar intentando cerrar
+                    # Si aún hay posiciones pendientes del día actual, continuar intentando cerrar
                     if close_action.get('pending_count', 0) > 0:
                         self.logger.warning(
                             f"⚠️  Cierre automático (4:50 PM NY): {close_action['pending_count']} posición(es) pendiente(s) - "
@@ -143,13 +154,13 @@ class PositionMonitor:
                         # Continuar con trailing stop pero priorizar cierre en el próximo ciclo
                         positions = remaining_positions
                     elif not remaining_positions:
-                        # Todas las posiciones fueron cerradas exitosamente
+                        # Todas las posiciones del día fueron cerradas exitosamente
                         self.logger.info(
-                            f"✅ Cierre automático (4:50 PM NY) completado - Todas las posiciones cerradas"
+                            f"✅ Cierre automático (4:50 PM NY) completado - Todas las posiciones del día cerradas"
                         )
                         return {
                             'success': True,
-                            'message': f'Todas las posiciones cerradas por hora de cierre (4:50 PM NY)',
+                            'message': f'Todas las posiciones del día cerradas por hora de cierre (4:50 PM NY)',
                             'actions': actions,
                             'open_count': 0
                         }
@@ -292,9 +303,13 @@ class PositionMonitor:
                         return None
             else:  # SELL
                 # SL a 50% del movimiento desde entry
-                target_sl = entry_price - (total_movement * self.trailing_sl_percent)
-                # El nuevo SL debe estar por debajo del SL actual (si existe) y por encima del precio actual
-                # Si hay un SL actual, el nuevo debe estar por debajo para proteger más ganancias
+                # Para SELL: el SL debe estar ARRIBA del entry (protege contra subidas)
+                # Concepto: cuando el precio ha recorrido 70% del camino, mover el SL para asegurar que capturemos al menos 50% de las ganancias
+                # Calculamos: entry + (50% del movimiento total)
+                # Esto coloca el SL a una distancia del entry igual al 50% del movimiento total
+                target_sl = entry_price + (total_movement * self.trailing_sl_percent)
+                # El nuevo SL debe estar por debajo del SL actual (si existe) para proteger más ganancias
+                # Para SELL: un SL más bajo (más cerca del precio actual) es mejor
                 if current_sl > 0 and target_sl >= current_sl:
                     # Ya se movió el SL anteriormente, solo actualizar si el nuevo es mejor
                     # Verificar si el precio actual permite un SL mejor
@@ -316,8 +331,9 @@ class PositionMonitor:
             if position_type == 'BUY' and (target_sl >= current_price or target_sl <= entry_price):
                 self.logger.warning(f"[{symbol}] SL objetivo inválido para BUY: {target_sl:.5f} (Entry: {entry_price:.5f}, Current: {current_price:.5f})")
                 return None
-            elif position_type == 'SELL' and (target_sl <= current_price or target_sl >= entry_price):
-                self.logger.warning(f"[{symbol}] SL objetivo inválido para SELL: {target_sl:.5f} (Entry: {entry_price:.5f}, Current: {current_price:.5f})")
+            elif position_type == 'SELL' and (target_sl <= current_price or target_sl <= entry_price):
+                # Para SELL: el SL debe estar ARRIBA del entry y ARRIBA del precio actual
+                self.logger.warning(f"[{symbol}] SL objetivo inválido para SELL: {target_sl:.5f} (Entry: {entry_price:.5f}, Current: {current_price:.5f}) - Debe estar arriba del entry")
                 return None
             
             # Log antes de aplicar
@@ -518,6 +534,122 @@ class PositionMonitor:
         except Exception as e:
             self.logger.error(f"Error al verificar hora de cierre automático: {e}", exc_info=True)
             return None
+    
+    def _get_position_creation_date(self, ticket: int, position_time: Optional[datetime] = None) -> Optional[date]:
+        """
+        Obtiene la fecha de creación de una posición
+        
+        Args:
+            ticket: Ticket de la posición
+            position_time: Fecha/hora de creación desde MT5 (opcional)
+            
+        Returns:
+            date en timezone NY o None si no se puede determinar
+        """
+        # Primero intentar desde MT5 si está disponible
+        if position_time and isinstance(position_time, datetime):
+            try:
+                # Convertir a timezone NY
+                if position_time.tzinfo is None:
+                    position_time_utc = tz('UTC').localize(position_time)
+                    position_time_ny = position_time_utc.astimezone(self.close_tz)
+                else:
+                    position_time_ny = position_time.astimezone(self.close_tz)
+                return position_time_ny.date()
+            except Exception as e:
+                self.logger.debug(f"Error al convertir fecha MT5 para ticket {ticket}: {e}")
+        
+        # Si no está disponible desde MT5, intentar desde BD
+        if self.db_manager.enabled:
+            try:
+                if not self.db_manager._ensure_connection():
+                    return None
+                
+                cursor = self.db_manager.connection.cursor()
+                query = "SELECT CreatedAt FROM Orders WHERE Ticket = ?"
+                cursor.execute(query, (ticket,))
+                row = cursor.fetchone()
+                cursor.close()
+                
+                if row and row[0]:
+                    created_at = row[0]
+                    if isinstance(created_at, datetime):
+                        # Convertir a timezone NY
+                        if created_at.tzinfo is None:
+                            created_at_utc = tz('UTC').localize(created_at)
+                            created_at_ny = created_at_utc.astimezone(self.close_tz)
+                        else:
+                            created_at_ny = created_at.astimezone(self.close_tz)
+                        return created_at_ny.date()
+            except Exception as e:
+                self.logger.debug(f"Error al consultar BD para ticket {ticket}: {e}")
+        
+        return None
+    
+    def _filter_today_positions(self, positions: List[Dict]) -> List[Dict]:
+        """
+        Filtra las posiciones para solo incluir las que fueron abiertas el día actual
+        
+        Args:
+            positions: Lista de posiciones desde MT5
+            
+        Returns:
+            Lista filtrada con solo posiciones del día actual
+        """
+        if not positions:
+            return []
+        
+        # Obtener fecha actual en timezone de NY (mismo que se usa para cierre automático)
+        now_ny = datetime.now(self.close_tz)
+        today_ny = now_ny.date()
+        
+        today_positions = []
+        skipped_positions = []
+        
+        for position in positions:
+            ticket = position.get('ticket')
+            symbol = position.get('symbol', 'UNKNOWN')
+            position_time = position.get('time')
+            
+            # Obtener fecha de creación
+            creation_date = self._get_position_creation_date(ticket, position_time)
+            
+            if creation_date:
+                # Verificar si es del día actual
+                if creation_date == today_ny:
+                    today_positions.append(position)
+                else:
+                    skipped_positions.append({
+                        'ticket': ticket,
+                        'symbol': symbol,
+                        'date': creation_date
+                    })
+            else:
+                # No se pudo determinar la fecha - incluir por seguridad pero loguear
+                self.logger.warning(
+                    f"[{symbol}] ⚠️  No se pudo determinar fecha de creación para ticket {ticket} - "
+                    f"Incluyendo en monitoreo por seguridad"
+                )
+                today_positions.append(position)
+        
+        # Log ocasional de posiciones filtradas (cada 5 minutos)
+        if skipped_positions:
+            if not hasattr(self, '_last_filter_log') or (time_module.time() - getattr(self, '_last_filter_log', 0)) >= 300:
+                self.logger.info(
+                    f"📅 Filtrado de posiciones: {len(skipped_positions)} posición(es) de día(s) anterior(es) "
+                    f"excluida(s) del monitoreo (solo se monitorean órdenes del día actual)"
+                )
+                # Mostrar algunas posiciones excluidas
+                for pos in skipped_positions[:3]:
+                    self.logger.debug(
+                        f"   ⏭️  Excluida: {pos['symbol']} - Ticket: {pos['ticket']} "
+                        f"(abierta el {pos['date']})"
+                    )
+                if len(skipped_positions) > 3:
+                    self.logger.debug(f"   ... y {len(skipped_positions) - 3} más")
+                self._last_filter_log = time_module.time()
+        
+        return today_positions
     
     def reset_daily_cache(self):
         """Resetea el cache de cierre diario (útil para testing o reseteo diario)"""
