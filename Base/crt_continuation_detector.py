@@ -62,12 +62,19 @@ class CRTContinuationDetector:
             candle_9am = get_candle('H4', '9am', symbol)
             
             if not candle_1am:
-                self.logger.warning(f"No se pudo obtener la vela de 1 AM para {symbol}")
+                self.logger.warning(f"[{symbol}] CRT Continuación: No se pudo obtener la vela de 1 AM")
                 return None
             
             if not candle_5am:
-                self.logger.warning(f"No se pudo obtener la vela de 5 AM para {symbol}")
+                self.logger.warning(f"[{symbol}] CRT Continuación: No se pudo obtener la vela de 5 AM")
                 return None
+            
+            # Log de diagnóstico de las velas obtenidas
+            self.logger.info(
+                f"[{symbol}] CRT Continuación - Analizando velas: "
+                f"1AM H={candle_1am.get('high'):.5f} L={candle_1am.get('low'):.5f} | "
+                f"5AM H={candle_5am.get('high'):.5f} L={candle_5am.get('low'):.5f} C={candle_5am.get('close'):.5f}"
+            )
             
             # La vela de 9 AM es opcional para la detección inicial, pero necesaria para el contexto
             # Si no existe aún, podemos continuar con la detección del patrón
@@ -168,6 +175,11 @@ class CRTContinuationDetector:
                 }
             
             # No se detectó CRT de Continuación
+            self.logger.debug(
+                f"[{symbol}] CRT Continuación: No se cumplieron condiciones | "
+                f"Barrió HIGH: {swept_high} | Barrió LOW: {swept_low} | "
+                f"Close fuera arriba: {close_outside_above} | Close fuera abajo: {close_outside_below}"
+            )
             return {
                 'detected': False,
                 'candle_1am': candle_1am,

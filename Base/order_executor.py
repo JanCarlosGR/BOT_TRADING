@@ -688,28 +688,36 @@ class OrderExecutor:
                     'error': 'SYMBOL_INFO_ERROR'
                 }
             
-            # Usar TP actual si no se especifica uno nuevo
-            if new_take_profit is None:
-                new_take_profit = position.tp if position.tp > 0 else 0
-            else:
-                # Validar y ajustar TP
-                new_take_profit, _ = self._validate_and_adjust_stops(
+            # Obtener TP actual de la posición
+            current_tp = position.tp if position.tp > 0 else 0
+            
+            # Determinar qué TP usar
+            if new_take_profit is not None and new_take_profit > 0:
+                # Se especificó un TP nuevo, validarlo
+                _, validated_tp = self._validate_and_adjust_stops(
                     symbol=symbol,
                     order_type=OrderType.BUY if position.type == mt5.ORDER_TYPE_BUY else OrderType.SELL,
                     entry_price=position.price_open,
-                    stop_loss=new_stop_loss,
+                    stop_loss=None,  # No validar SL aquí, solo TP
                     take_profit=new_take_profit
                 )
-                if new_take_profit is None:
-                    new_take_profit = position.tp if position.tp > 0 else 0
+                if validated_tp is None:
+                    # Si el TP nuevo es inválido, mantener el TP actual
+                    new_take_profit = current_tp
+                else:
+                    new_take_profit = validated_tp
+            else:
+                # No se especificó TP nuevo, usar el TP actual (no validar, ya está en la posición)
+                new_take_profit = current_tp
             
-            # Validar y ajustar SL
+            # Validar y ajustar SOLO el SL (no pasar TP para validación si es el mismo que ya tiene la posición)
+            # Esto evita validar un TP que ya está correctamente configurado en la posición
             adjusted_sl, _ = self._validate_and_adjust_stops(
                 symbol=symbol,
                 order_type=OrderType.BUY if position.type == mt5.ORDER_TYPE_BUY else OrderType.SELL,
                 entry_price=position.price_open,
                 stop_loss=new_stop_loss,
-                take_profit=new_take_profit
+                take_profit=None  # No validar TP aquí, solo validar SL
             )
             
             if adjusted_sl is None:

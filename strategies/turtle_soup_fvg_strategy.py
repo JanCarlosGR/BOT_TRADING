@@ -878,17 +878,27 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 return None
             
             # Verificar la dirección de salida según el tipo de FVG y dirección esperada
+            # ⚠️ VALIDACIÓN CRÍTICA: El precio DEBE salir del FVG en la dirección CORRECTA
+            # Si sale en dirección INCORRECTA, se rechaza la entrada
             if calculated_fvg_type == 'BAJISTA' and direction == 'BEARISH':
                 # FVG BAJISTA + dirección BEARISH: precio debe estar DEBAJO del FVG
                 if current_price < fvg_bottom:
                     price_exited_fvg = True
                     exit_direction = 'BAJISTA'
                     self.logger.info(f"[{symbol}] 📍 Precio salió del FVG BAJISTA: Precio actual ({current_price:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f})")
+                elif current_price > fvg_top:
+                    # ⚠️ ERROR CRÍTICO: Precio salió ARRIBA del FVG pero esperábamos salida BAJISTA
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG en dirección INCORRECTA | "
+                        f"FVG BAJISTA + dirección BEARISH esperada, pero precio ({current_price:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f}) | "
+                        f"El precio salió ALCISTA cuando debería haber salido BAJISTA - RECHAZANDO ENTRADA"
+                    )
+                    return None
                 else:
-                    # Precio está arriba del FVG pero esperábamos salida bajista
+                    # Precio aún dentro del FVG o en el borde (no debería llegar aquí por la validación anterior)
                     self.logger.info(
-                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Precio salió del FVG pero en dirección incorrecta | "
-                        f"Precio actual={current_price:.5f} está ARRIBA del FVG (esperábamos DEBAJO para {direction})"
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Precio aún no salió del FVG en dirección {direction} | "
+                        f"Precio actual={current_price:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
                     )
                     return None
             elif calculated_fvg_type == 'ALCISTA' and direction == 'BULLISH':
@@ -897,11 +907,19 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                     price_exited_fvg = True
                     exit_direction = 'ALCISTA'
                     self.logger.info(f"[{symbol}] 📍 Precio salió del FVG ALCISTA: Precio actual ({current_price:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f})")
+                elif current_price < fvg_bottom:
+                    # ⚠️ ERROR CRÍTICO: Precio salió DEBAJO del FVG pero esperábamos salida ALCISTA
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG en dirección INCORRECTA | "
+                        f"FVG ALCISTA + dirección BULLISH esperada, pero precio ({current_price:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f}) | "
+                        f"El precio salió BAJISTA cuando debería haber salido ALCISTA - RECHAZANDO ENTRADA"
+                    )
+                    return None
                 else:
-                    # Precio está debajo del FVG pero esperábamos salida alcista
+                    # Precio aún dentro del FVG o en el borde (no debería llegar aquí por la validación anterior)
                     self.logger.info(
-                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Precio salió del FVG pero en dirección incorrecta | "
-                        f"Precio actual={current_price:.5f} está DEBAJO del FVG (esperábamos ARRIBA para {direction})"
+                        f"[{symbol}] ⏸️  REGLA NO CUMPLIDA: Precio aún no salió del FVG en dirección {direction} | "
+                        f"Precio actual={current_price:.5f} | FVG: {fvg_bottom:.5f}-{fvg_top:.5f}"
                     )
                     return None
             else:
@@ -1222,7 +1240,7 @@ class TurtleSoupFVGStrategy(BaseStrategy):
             reward = abs(take_profit - entry_price)
             required_risk = reward / self.min_rr
             fvg_size = fvg_top - fvg_bottom
-            safety_margin = fvg_size * 0.5  # 50% adicional más allá del FVG (igual que en el cálculo principal)
+            safety_margin = fvg_size * 0.3  # 30% adicional más allá del FVG (reducido de 50% para SL más corto)
             
             if direction == 'BULLISH':
                 # Compra: SL debe estar debajo del entry
@@ -1418,20 +1436,50 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 return None
             
             # VALIDACIÓN FINAL 3: La dirección de salida DEBE ser correcta
+            # ⚠️ VALIDACIÓN CRÍTICA: El precio DEBE salir del FVG en la dirección CORRECTA
+            # Si sale en dirección INCORRECTA, se CANCELA la orden
             if calculated_fvg_type == 'BAJISTA' and direction == 'BEARISH':
                 # FVG BAJISTA + dirección BEARISH: precio debe estar DEBAJO del FVG
-                if current_price >= fvg_bottom:
+                if current_price < fvg_bottom:
+                    # ✅ Precio salió correctamente (DEBAJO del FVG)
+                    self.logger.info(
+                        f"[{symbol}] ✅ Validación dirección: Precio ({current_price:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f}) - Dirección correcta"
+                    )
+                elif current_price > fvg_top:
+                    # ❌ ERROR CRÍTICO: Precio salió ARRIBA del FVG pero esperábamos salida BAJISTA
                     self.logger.error(
-                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG pero en dirección incorrecta | "
-                        f"Precio actual={current_price:.5f} debe estar DEBAJO de {fvg_bottom:.5f} para {direction} - Cancelando orden"
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG en dirección INCORRECTA | "
+                        f"FVG BAJISTA + dirección BEARISH esperada, pero precio ({current_price:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f}) | "
+                        f"El precio salió ALCISTA cuando debería haber salido BAJISTA - CANCELANDO ORDEN"
+                    )
+                    return None
+                else:
+                    # Precio aún dentro del FVG o en el borde
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio ({current_price:.5f}) NO salió del FVG en dirección {direction} | "
+                        f"Debe estar DEBAJO de {fvg_bottom:.5f} - Cancelando orden"
                     )
                     return None
             elif calculated_fvg_type == 'ALCISTA' and direction == 'BULLISH':
                 # FVG ALCISTA + dirección BULLISH: precio debe estar ARRIBA del FVG
-                if current_price <= fvg_top:
+                if current_price > fvg_top:
+                    # ✅ Precio salió correctamente (ARRIBA del FVG)
+                    self.logger.info(
+                        f"[{symbol}] ✅ Validación dirección: Precio ({current_price:.5f}) está ARRIBA del FVG Top ({fvg_top:.5f}) - Dirección correcta"
+                    )
+                elif current_price < fvg_bottom:
+                    # ❌ ERROR CRÍTICO: Precio salió DEBAJO del FVG pero esperábamos salida ALCISTA
                     self.logger.error(
-                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG pero en dirección incorrecta | "
-                        f"Precio actual={current_price:.5f} debe estar ARRIBA de {fvg_top:.5f} para {direction} - Cancelando orden"
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio salió del FVG en dirección INCORRECTA | "
+                        f"FVG ALCISTA + dirección BULLISH esperada, pero precio ({current_price:.5f}) está DEBAJO del FVG Bottom ({fvg_bottom:.5f}) | "
+                        f"El precio salió BAJISTA cuando debería haber salido ALCISTA - CANCELANDO ORDEN"
+                    )
+                    return None
+                else:
+                    # Precio aún dentro del FVG o en el borde
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio ({current_price:.5f}) NO salió del FVG en dirección {direction} | "
+                        f"Debe estar ARRIBA de {fvg_top:.5f} - Cancelando orden"
                     )
                     return None
             else:
@@ -1479,12 +1527,62 @@ class TurtleSoupFVGStrategy(BaseStrategy):
                 entry_price = float(tick.bid)  # Venta: precio BID
                 self.logger.info(f"[{symbol}] 💹 Precio de entrada a mercado (SELL): {entry_price:.5f} (BID actual)")
             
-            # ⚠️ VERIFICAR Y AJUSTAR SL CON EL PRECIO REAL DE ENTRADA
-            # El SL puede haberse calculado con un precio diferente, asegurar distancia mínima con precio real
+            # ⚠️ VALIDACIÓN CRÍTICA: El precio de entrada DEBE estar fuera del FVG con distancia mínima
+            # Esto previene entradas cuando el precio está justo en el borde del FVG o dentro de él
+            # debido a la diferencia entre BID/ASK y el precio usado en la validación anterior
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
                 self.logger.error(f"[{symbol}] ❌ No se pudo obtener información del símbolo")
                 return None
+            
+            point = symbol_info.point
+            spread_points = symbol_info.spread
+            spread_price = spread_points * point
+            
+            # Distancia mínima requerida desde el FVG: spread + margen de seguridad (2 pips mínimo)
+            # Esto asegura que el precio de entrada esté claramente fuera del FVG
+            # Usamos los valores del FVG calculado (fvg_top y fvg_bottom) que ya fueron validados arriba
+            pips_to_points = 10 if symbol_info.digits == 5 else 1
+            min_distance_from_fvg = max(
+                spread_price * 2,  # Al menos 2x el spread
+                point * pips_to_points * 2  # Mínimo 2 pips
+            )
+            
+            # Validar que el precio de entrada esté fuera del FVG con distancia mínima
+            if direction == 'BULLISH' and calculated_fvg_type == 'ALCISTA':
+                # Para BUY con FVG ALCISTA: entry_price (ASK) debe estar ARRIBA del FVG Top con distancia mínima
+                required_min_price = fvg_top + min_distance_from_fvg
+                if entry_price <= required_min_price:
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio de entrada (ASK={entry_price:.5f}) está muy cerca o dentro del FVG | "
+                        f"FVG Top: {fvg_top:.5f} | Precio mínimo requerido: {required_min_price:.5f} | "
+                        f"Distancia mínima: {min_distance_from_fvg:.5f} ({min_distance_from_fvg * (10000 if symbol_info.digits == 5 else 100):.1f} pips) | "
+                        f"Cancelando orden - El precio debe salir más del FVG antes de entrar"
+                    )
+                    return None
+                self.logger.info(
+                    f"[{symbol}] ✅ Precio de entrada validado: ASK={entry_price:.5f} está ARRIBA del FVG Top ({fvg_top:.5f}) "
+                    f"con distancia de {entry_price - fvg_top:.5f} ({(entry_price - fvg_top) * (10000 if symbol_info.digits == 5 else 100):.1f} pips)"
+                )
+            elif direction == 'BEARISH' and calculated_fvg_type == 'BAJISTA':
+                # Para SELL con FVG BAJISTA: entry_price (BID) debe estar DEBAJO del FVG Bottom con distancia mínima
+                required_max_price = fvg_bottom - min_distance_from_fvg
+                if entry_price >= required_max_price:
+                    self.logger.error(
+                        f"[{symbol}] ❌ VALIDACIÓN FALLIDA: Precio de entrada (BID={entry_price:.5f}) está muy cerca o dentro del FVG | "
+                        f"FVG Bottom: {fvg_bottom:.5f} | Precio máximo requerido: {required_max_price:.5f} | "
+                        f"Distancia mínima: {min_distance_from_fvg:.5f} ({min_distance_from_fvg * (10000 if symbol_info.digits == 5 else 100):.1f} pips) | "
+                        f"Cancelando orden - El precio debe salir más del FVG antes de entrar"
+                    )
+                    return None
+                self.logger.info(
+                    f"[{symbol}] ✅ Precio de entrada validado: BID={entry_price:.5f} está DEBAJO del FVG Bottom ({fvg_bottom:.5f}) "
+                    f"con distancia de {fvg_bottom - entry_price:.5f} ({(fvg_bottom - entry_price) * (10000 if symbol_info.digits == 5 else 100):.1f} pips)"
+                )
+            
+            # ⚠️ VERIFICAR Y AJUSTAR SL CON EL PRECIO REAL DE ENTRADA
+            # El SL puede haberse calculado con un precio diferente, asegurar distancia mínima con precio real
+            # (symbol_info ya fue obtenido arriba, reutilizamos)
             
             point = symbol_info.point
             spread_points = symbol_info.spread

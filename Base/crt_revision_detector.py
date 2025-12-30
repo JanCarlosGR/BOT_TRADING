@@ -61,12 +61,19 @@ class CRTRevisionDetector:
             candle_9am = get_candle('H4', '9am', symbol)
             
             if not candle_1am:
-                self.logger.warning(f"No se pudo obtener la vela de 1 AM para {symbol}")
+                self.logger.warning(f"[{symbol}] CRT Revisión: No se pudo obtener la vela de 1 AM")
                 return None
             
             if not candle_5am:
-                self.logger.warning(f"No se pudo obtener la vela de 5 AM para {symbol}")
+                self.logger.warning(f"[{symbol}] CRT Revisión: No se pudo obtener la vela de 5 AM")
                 return None
+            
+            # Log de diagnóstico de las velas obtenidas
+            self.logger.info(
+                f"[{symbol}] CRT Revisión - Analizando velas: "
+                f"1AM H={candle_1am.get('high'):.5f} L={candle_1am.get('low'):.5f} | "
+                f"5AM H={candle_5am.get('high'):.5f} L={candle_5am.get('low'):.5f}"
+            )
             
             # La vela de 9 AM es opcional para la detección inicial, pero necesaria para el contexto
             # Si no existe aún, podemos continuar con la detección del patrón
@@ -109,6 +116,11 @@ class CRTRevisionDetector:
             
             # Si el cuerpo NO está dentro del rango (HIGH-LOW) de la vela 1 AM, no es CRT de Revisión
             if not body_inside_range:
+                self.logger.debug(
+                    f"[{symbol}] CRT Revisión: Cuerpo de vela 5 AM NO está dentro del rango de vela 1 AM | "
+                    f"Body 5AM: {candle_5am_body_bottom:.5f}-{candle_5am_body_top:.5f} | "
+                    f"Rango 1AM: {candle_1am_low:.5f}-{candle_1am_high:.5f}"
+                )
                 return None
             
             # Si el cuerpo está dentro del rango (HIGH-LOW) de la vela 1 AM, es Revisión automáticamente
@@ -119,6 +131,7 @@ class CRTRevisionDetector:
             
             # Si barrió ambos extremos, NO es CRT de Revisión (es CRT de Extremo)
             if swept_high and swept_low:
+                self.logger.debug(f"[{symbol}] CRT Revisión: Vela 5 AM barrió AMBOS extremos → Es CRT de EXTREMO, no Revisión")
                 return None
             
             # Ahora verificamos qué extremo fue barrido para determinar la dirección
@@ -165,6 +178,11 @@ class CRTRevisionDetector:
                 }
             
             # No se cumplieron las condiciones para CRT de Revisión
+            self.logger.debug(
+                f"[{symbol}] CRT Revisión: No se cumplieron condiciones | "
+                f"Barrió HIGH: {swept_high} | Barrió LOW: {swept_low} | "
+                f"Cuerpo dentro rango: {body_inside_range}"
+            )
             return None
             
         except Exception as e:

@@ -924,8 +924,8 @@ class CRTRevisionStrategy(BaseStrategy):
             point = symbol_info.point
             spread_price = spread_points * point
             
-            # Usar 50% del tamaño del FVG como margen adicional para proteger contra retrocesos
-            safety_margin = fvg_size * 0.5
+            # Usar 30% del tamaño del FVG como margen adicional para proteger contra retrocesos (reducido de 50% para SL más corto)
+            safety_margin = fvg_size * 0.3
             
             # Distancia mínima del SL: spread + margen de seguridad
             min_sl_distance = max(
@@ -1043,7 +1043,7 @@ class CRTRevisionStrategy(BaseStrategy):
             reward = abs(take_profit - entry_price)
             required_risk = reward / self.min_rr
             fvg_size = fvg_top - fvg_bottom
-            safety_margin = fvg_size * 0.5
+            safety_margin = fvg_size * 0.3  # Reducido de 50% a 30% para SL más corto
             
             if direction == 'BULLISH':
                 optimal_sl = entry_price - required_risk

@@ -11,7 +11,7 @@ trading_hours:
   end_time: '23:59'
   timezone: America/New_York
 strategy:
-  name: turtle_soup_fvg
+  name: crt_strategy
 strategy_schedule:
   enabled: false
   timezone: America/New_York
