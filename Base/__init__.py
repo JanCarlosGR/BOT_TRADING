@@ -40,6 +40,15 @@ from .crt_extreme_detector import (
     detect_crt_extreme,
     CRTextremeDetector,
 )
+from .daily_levels_detector import (
+    get_previous_daily_levels,
+    detect_daily_level_touch,
+    detect_daily_high_take,
+    detect_daily_low_take,
+    get_yesterday_levels,
+    is_price_near_daily_level,
+    DailyLevelsDetector,
+)
 from .strategy_scheduler import StrategyScheduler
 
 __all__ = [
@@ -81,6 +90,14 @@ __all__ = [
     # CRT Extreme Detector
     'detect_crt_extreme',
     'CRTextremeDetector',
+    # Daily Levels Detector
+    'get_previous_daily_levels',
+    'detect_daily_level_touch',
+    'detect_daily_high_take',
+    'detect_daily_low_take',
+    'get_yesterday_levels',
+    'is_price_near_daily_level',
+    'DailyLevelsDetector',
     # Strategy Scheduler
     'StrategyScheduler',
 ]
