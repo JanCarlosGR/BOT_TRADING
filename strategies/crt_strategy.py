@@ -240,6 +240,43 @@ class CRTStrategy(BaseStrategy):
             target_price = sweep.get('target_price')
             crt_type = sweep.get('crt_type', 'UNKNOWN')
             
+            # Log de diagnóstico para verificar TP asignado
+            candle_1am = sweep.get('candle_1am', {})
+            candle_1am_high = candle_1am.get('high') if candle_1am else None
+            candle_1am_low = candle_1am.get('low') if candle_1am else None
+            swept_extreme = sweep.get('swept_extreme', 'UNKNOWN')
+            
+            # Formatear valores para el log (manejar None)
+            high_str = f"{candle_1am_high:.5f}" if candle_1am_high is not None else 'N/A'
+            low_str = f"{candle_1am_low:.5f}" if candle_1am_low is not None else 'N/A'
+            
+            self.logger.info(
+                f"[{symbol}] 🔍 DIAGNÓSTICO CRT {crt_type}: "
+                f"Dirección={direction} | TP={target_price:.5f} | "
+                f"Extremo barrido={swept_extreme} | "
+                f"Vela 1AM HIGH={high_str} | "
+                f"Vela 1AM LOW={low_str}"
+            )
+            
+            # Validación: Verificar que el TP asignado sea correcto según el extremo barrido
+            if crt_type == 'REVISIÓN':
+                if swept_extreme == 'low' and direction == 'BULLISH':
+                    # Se barrió LOW → TP debe ser HIGH de vela 1 AM
+                    if candle_1am_high and abs(target_price - candle_1am_high) > 0.0001:
+                        self.logger.error(
+                            f"[{symbol}] ❌ ERROR: TP incorrecto para CRT REVISIÓN | "
+                            f"Se barrió LOW → TP debería ser HIGH de vela 1 AM ({candle_1am_high:.5f}) "
+                            f"pero se asignó {target_price:.5f}"
+                        )
+                elif swept_extreme == 'high' and direction == 'BEARISH':
+                    # Se barrió HIGH → TP debe ser LOW de vela 1 AM
+                    if candle_1am_low and abs(target_price - candle_1am_low) > 0.0001:
+                        self.logger.error(
+                            f"[{symbol}] ❌ ERROR: TP incorrecto para CRT REVISIÓN | "
+                            f"Se barrió HIGH → TP debería ser LOW de vela 1 AM ({candle_1am_low:.5f}) "
+                            f"pero se asignó {target_price:.5f}"
+                        )
+            
             # ⚠️ VERIFICACIÓN CRÍTICA: Verificar si el precio del mercado YA ALCANZÓ el objetivo (TP) del CRT
             if self._check_crt_target_reached(symbol, target_price, direction):
                 self.logger.warning(f"[{symbol}] {'='*70}")
@@ -546,10 +583,15 @@ class CRTStrategy(BaseStrategy):
     
     def _check_crt_target_reached(self, symbol: str, target_price: float, direction: str) -> bool:
         """
-        Verifica si el precio del mercado YA ALCANZÓ el objetivo (TP) del CRT
+        Verifica si el precio ACTUAL del mercado YA ALCANZÓ el objetivo (TP) del CRT
         
-        Si el precio ya pasó por el TP del CRT (incluso sin haber ejecutado un trade),
-        se cierra el día operativo porque el objetivo ya fue alcanzado.
+        ⚠️ IMPORTANTE: Solo verifica el precio ACTUAL, no velas históricas.
+        El objetivo solo se considera alcanzado si el precio ACTUAL está en o más allá del TP.
+        Si el precio pasó temporalmente por el TP pero volvió, el objetivo NO fue alcanzado.
+        
+        Para CRT de REVISIÓN:
+        - Dirección BULLISH: El precio ACTUAL debe estar en o por encima del HIGH de vela 1 AM
+        - Dirección BEARISH: El precio ACTUAL debe estar en o por debajo del LOW de vela 1 AM
         
         Args:
             symbol: Símbolo a verificar
@@ -557,12 +599,13 @@ class CRTStrategy(BaseStrategy):
             direction: Dirección del CRT ('BULLISH' o 'BEARISH')
             
         Returns:
-            True si el precio ya alcanzó el TP, False en caso contrario
+            True si el precio ACTUAL ya alcanzó el TP, False en caso contrario
         """
         try:
             # Obtener precio actual del mercado
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
+                self.logger.warning(f"[{symbol}] ⚠️  No se pudo obtener precio actual para verificar TP")
                 return False
             
             current_price = float(tick.bid)  # Usar bid como referencia
@@ -570,58 +613,40 @@ class CRTStrategy(BaseStrategy):
             # Verificar según la dirección del CRT
             if direction == 'BULLISH':
                 # Para CRT alcista, el TP está arriba
-                # Si el precio actual (bid) ya está ARRIBA del TP, el objetivo fue alcanzado
+                # El precio ACTUAL debe estar en o por encima del TP para considerar que fue alcanzado
                 if current_price >= target_price:
                     self.logger.info(
-                        f"[{symbol}] 🎯 Precio actual ({current_price:.5f}) ya está ARRIBA del TP ({target_price:.5f}) - "
+                        f"[{symbol}] 🎯 Precio ACTUAL ({current_price:.5f}) está en o ARRIBA del TP ({target_price:.5f}) - "
                         f"Objetivo del CRT ya fue alcanzado"
                     )
                     return True
+                else:
+                    # El precio actual NO está en o por encima del TP
+                    self.logger.debug(
+                        f"[{symbol}] 📊 Precio ACTUAL ({current_price:.5f}) aún NO alcanzó el TP ({target_price:.5f}) - "
+                        f"Objetivo del CRT aún NO alcanzado"
+                    )
+                    return False
             else:  # BEARISH
                 # Para CRT bajista, el TP está abajo
-                # Si el precio actual (bid) ya está DEBAJO del TP, el objetivo fue alcanzado
+                # El precio ACTUAL debe estar en o por debajo del TP para considerar que fue alcanzado
                 if current_price <= target_price:
                     self.logger.info(
-                        f"[{symbol}] 🎯 Precio actual ({current_price:.5f}) ya está DEBAJO del TP ({target_price:.5f}) - "
+                        f"[{symbol}] 🎯 Precio ACTUAL ({current_price:.5f}) está en o DEBAJO del TP ({target_price:.5f}) - "
                         f"Objetivo del CRT ya fue alcanzado"
                     )
                     return True
+                else:
+                    # El precio actual NO está en o por debajo del TP
+                    self.logger.debug(
+                        f"[{symbol}] 📊 Precio ACTUAL ({current_price:.5f}) aún NO alcanzó el TP ({target_price:.5f}) - "
+                        f"Objetivo del CRT aún NO alcanzado"
+                    )
+                    return False
             
-            # También verificar el histórico de velas para ver si el precio pasó por el TP
-            # Obtener velas H4 del día actual para verificar si el precio alcanzó el TP
-            today = date.today()
-            from datetime import time as dt_time
-            start_time = datetime.combine(today, dt_time(0, 0, 0))
-            end_time = datetime.combine(today, dt_time(23, 59, 59))
-            
-            start_timestamp = int(start_time.timestamp())
-            end_timestamp = int(end_time.timestamp())
-            
-            # Obtener velas H4 desde el inicio del día
-            rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_H4, start_timestamp, end_timestamp)
-            
-            if rates is not None and len(rates) > 0:
-                # Verificar si alguna vela del día alcanzó el TP
-                for rate in rates:
-                    high = float(rate['high'])
-                    low = float(rate['low'])
-                    
-                    if direction == 'BULLISH':
-                        # Para CRT alcista, verificar si alguna vela alcanzó el TP (HIGH >= TP)
-                        if high >= target_price:
-                            self.logger.info(
-                                f"[{symbol}] 🎯 Vela H4 del día alcanzó el TP ({target_price:.5f}) - "
-                                f"High de vela: {high:.5f} - Objetivo del CRT ya fue alcanzado"
-                            )
-                            return True
-                    else:  # BEARISH
-                        # Para CRT bajista, verificar si alguna vela alcanzó el TP (LOW <= TP)
-                        if low <= target_price:
-                            self.logger.info(
-                                f"[{symbol}] 🎯 Vela H4 del día alcanzó el TP ({target_price:.5f}) - "
-                                f"Low de vela: {low:.5f} - Objetivo del CRT ya fue alcanzado"
-                            )
-                            return True
+        except Exception as e:
+            self.logger.error(f"Error al verificar si precio alcanzó TP de CRT: {e}", exc_info=True)
+            return False
             
             return False
             

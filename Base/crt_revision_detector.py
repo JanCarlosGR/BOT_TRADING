@@ -143,7 +143,7 @@ class CRTRevisionDetector:
                 # Se barrió el HIGH de la vela 1 AM
                 # El cuerpo cierra dentro del rango (ya verificado arriba)
                 # TP = LOW de la vela 1 AM (extremo opuesto)
-                return {
+                result = {
                     'detected': True,
                     'sweep_type': 'BULLISH_SWEEP',  # Barrió el HIGH (alcista)
                     'direction': 'BEARISH',  # Dirección hacia el TP (LOW de vela 1 AM)
@@ -156,6 +156,14 @@ class CRTRevisionDetector:
                     'body_inside_range': True,  # Confirmado: cuerpo dentro del rango
                     'close_type': 'BULLISH' if candle_5am_is_bullish else 'BEARISH',
                 }
+                # Log de validación para diagnóstico
+                self.logger.info(
+                    f"[{symbol}] ✅ CRT REVISIÓN detectado - Barrió HIGH | "
+                    f"TP asignado: {candle_1am_low:.5f} (LOW de vela 1 AM) | "
+                    f"HIGH de vela 1 AM: {candle_1am_high:.5f} | "
+                    f"Dirección: BEARISH (hacia LOW)"
+                )
+                return result
             
             # Verificar si la vela 5 AM barrió el LOW de la vela 1 AM (con mecha o cuerpo)
             # Para ser barrido, el LOW de la vela 5 AM debe ser menor al LOW de la vela 1 AM
@@ -163,7 +171,7 @@ class CRTRevisionDetector:
                 # Se barrió el LOW de la vela 1 AM
                 # El cuerpo cierra dentro del rango (ya verificado arriba)
                 # TP = HIGH de la vela 1 AM (extremo opuesto)
-                return {
+                result = {
                     'detected': True,
                     'sweep_type': 'BEARISH_SWEEP',  # Barrió el LOW (bajista)
                     'direction': 'BULLISH',  # Dirección hacia el TP (HIGH de vela 1 AM)
@@ -176,6 +184,14 @@ class CRTRevisionDetector:
                     'body_inside_range': True,  # Confirmado: cuerpo dentro del rango
                     'close_type': 'BULLISH' if candle_5am_is_bullish else 'BEARISH',
                 }
+                # Log de validación para diagnóstico
+                self.logger.info(
+                    f"[{symbol}] ✅ CRT REVISIÓN detectado - Barrió LOW | "
+                    f"TP asignado: {candle_1am_high:.5f} (HIGH de vela 1 AM) | "
+                    f"LOW de vela 1 AM: {candle_1am_low:.5f} | "
+                    f"Dirección: BULLISH (hacia HIGH)"
+                )
+                return result
             
             # No se cumplieron las condiciones para CRT de Revisión
             self.logger.debug(
