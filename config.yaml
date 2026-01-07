@@ -1,7 +1,8 @@
 mt5:
-  login: 1520929711
-  password: iTPN*h$3$?pA*
-  server: FTMO-Demo2
+  login: 1512252339
+  password: XRkb2NTe!b2E
+  read_only_password: 3nR@zu?q4GPu
+  server: FTMO-Demo
   path: C:\Program Files\MetaTrader 5\terminal64.exe
 symbols:
 - EURUSD
@@ -11,7 +12,7 @@ trading_hours:
   end_time: '23:59'
   timezone: America/New_York
 strategy:
-  name: crt_strategy
+  name: turtle_soup_fvg
 strategy_schedule:
   enabled: false
   timezone: America/New_York

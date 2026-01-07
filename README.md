@@ -17,8 +17,9 @@ Bot de trading automatizado con soporte multi-estrategia, gestión de horarios o
   - 📈 Detector de FVG - Fair Value Gap (`fvg_detector.py`)
   - 📰 Verificador de noticias económicas (`news_checker.py`)
   - 💹 Ejecutor de órdenes MT5 (`order_executor.py`)
-  - 💾 Sistema de base de datos SQL Server (`database.py`) - **NUEVO**
-  - 📝 Handler de logging en BD (`db_log_handler.py`) - **NUEVO**
+  - 💾 Sistema de base de datos SQL Server (`database.py`)
+  - 📝 Handler de logging en BD (`db_log_handler.py`)
+  - 📉 Detector de niveles diarios - PDH/PDL (`daily_levels_detector.py`) - **NUEVO**
 
 ## Instalación
 
@@ -102,10 +103,12 @@ El bot:
     ├── candle_reader.py       # Lector de velas reutilizable
     ├── fvg_detector.py         # Detector de Fair Value Gap (FVG)
     ├── news_checker.py         # Verificador de noticias económicas
+    ├── daily_levels_detector.py # Detector de niveles diarios (PDH/PDL)
     └── Documentation/          # Documentación completa
         ├── CANDLE_READER_DOCS.md
         ├── FVG_DETECTOR_DOCS.md
-        └── NEWS_CHECKER_DOCS.md
+        ├── NEWS_CHECKER_DOCS.md
+        └── DAILY_LEVELS_DETECTOR_DOCS.md
 ```
 
 ## Módulos Reutilizables (Base/)
@@ -237,6 +240,54 @@ result = executor.sell(
 
 ---
 
+### 📉 5. Detector de Niveles Diarios (`daily_levels_detector.py`)
+
+Detecta cuando el precio está tomando (alcanzando) los altos (HIGH) o bajos (LOW) diarios de días anteriores. Esencial para identificar niveles de liquidez y zonas de interés en trading ICT/SMC.
+
+**📚 Documentación completa:** [Base/Documentation/DAILY_LEVELS_DETECTOR_DOCS.md](Base/Documentation/DAILY_LEVELS_DETECTOR_DOCS.md)
+
+**Uso básico:**
+```python
+from Base import (
+    get_previous_daily_levels,
+    detect_daily_level_touch,
+    detect_daily_high_take,
+    detect_daily_low_take,
+    get_yesterday_levels
+)
+
+# Obtener niveles previos
+levels = get_previous_daily_levels('EURUSD', lookback_days=5)
+if levels:
+    print(f"Highest High: {levels['highest_high']:.5f}")
+    print(f"Lowest Low: {levels['lowest_low']:.5f}")
+
+# Detectar si el precio está tomando un Daily High
+high_take = detect_daily_high_take('EURUSD', lookback_days=5, tolerance_pips=1.0)
+if high_take:
+    print(f"Daily High tomado: {high_take['level_price']:.5f}")
+
+# Detectar si el precio está tomando un Daily Low
+low_take = detect_daily_low_take('EURUSD', lookback_days=5, tolerance_pips=1.0)
+if low_take:
+    print(f"Daily Low tomado: {low_take['level_price']:.5f}")
+
+# Obtener niveles de ayer
+yesterday = get_yesterday_levels('EURUSD')
+if yesterday:
+    print(f"Ayer - High: {yesterday['high']:.5f}, Low: {yesterday['low']:.5f}")
+```
+
+**Características:**
+- ✅ Detecta Previous Daily High (PDH) y Previous Daily Low (PDL)
+- ✅ Detecta la toma incluso si es por solo 1 pip
+- ✅ Obtiene niveles de días anteriores (configurable)
+- ✅ Funciones específicas para detectar toma de HIGH o LOW
+- ✅ Obtiene niveles de ayer específicamente
+- ✅ Tolerancia configurable en pips
+
+---
+
 ### 🔗 Importar desde Base
 
 Todas las funciones principales están disponibles desde `Base`:
@@ -244,13 +295,18 @@ Todas las funciones principales están disponibles desde `Base`:
 ```python
 # Forma recomendada
 from Base import (
-    get_candle,              # Lector de velas
-    detect_fvg,              # Detector de FVG
-    can_trade_now,           # Verificar noticias
-    get_daily_news_summary,  # Resumen de noticias
-    OrderExecutor,            # Ejecutor de órdenes
-    buy_order,                # Función rápida de compra
-    sell_order                # Función rápida de venta
+    get_candle,                      # Lector de velas
+    detect_fvg,                      # Detector de FVG
+    can_trade_now,                   # Verificar noticias
+    get_daily_news_summary,          # Resumen de noticias
+    OrderExecutor,                   # Ejecutor de órdenes
+    buy_order,                       # Función rápida de compra
+    sell_order,                      # Función rápida de venta
+    get_previous_daily_levels,       # Obtener niveles diarios previos
+    detect_daily_level_touch,         # Detectar toque de nivel diario
+    detect_daily_high_take,          # Detectar toma de Daily High
+    detect_daily_low_take,           # Detectar toma de Daily Low
+    get_yesterday_levels              # Obtener niveles de ayer
 )
 ```
 

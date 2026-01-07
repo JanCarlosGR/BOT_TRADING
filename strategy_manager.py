@@ -29,6 +29,7 @@ class StrategyManager:
         from strategies.crt_continuation_strategy import CRTContinuationStrategy
         from strategies.crt_revision_strategy import CRTRevisionStrategy
         from strategies.crt_extreme_strategy import CRTextremeStrategy
+        from strategies.daily_levels_sweep_strategy import DailyLevelsSweepStrategy
         
         self.strategies = {
             'default': DefaultStrategy(config),
@@ -37,6 +38,7 @@ class StrategyManager:
             'crt_continuation': CRTContinuationStrategy(config),
             'crt_revision': CRTRevisionStrategy(config),
             'crt_extreme': CRTextremeStrategy(config),
+            'daily_levels_sweep': DailyLevelsSweepStrategy(config),
             # Aquí se agregarán más estrategias
             # 'rsi_strategy': RSIStrategy(config),
             # 'moving_average': MovingAverageStrategy(config),

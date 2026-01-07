@@ -176,8 +176,22 @@ class TradingBot:
         # Obtener estrategia activa según el scheduler (puede cambiar por jornada)
         strategy_name = self.strategy_scheduler.get_current_strategy()
         
-        # ⚠️ VERIFICACIÓN TEMPRANA: Si la estrategia alcanzó el límite de trades, detener análisis
+        # Verificar si la estrategia funciona 24/7 (sin restricción de horario)
         strategy = self.strategy_manager.strategies.get(strategy_name)
+        is_24_7_strategy = False
+        if strategy and hasattr(strategy, 'is_24_7_strategy'):
+            is_24_7_strategy = strategy.is_24_7_strategy()
+        
+        # Verificar horario operativo (solo si la estrategia no es 24/7)
+        if not is_24_7_strategy:
+            if not self._is_trading_time():
+                # Solo loguear una vez cada 5 minutos para no saturar
+                if not hasattr(self, '_last_trading_hours_log') or (time_module.time() - self._last_trading_hours_log) >= 300:
+                    self.logger.debug("Fuera de horario operativo, esperando...")
+                    self._last_trading_hours_log = time_module.time()
+                return
+        
+        # ⚠️ VERIFICACIÓN TEMPRANA: Si la estrategia alcanzó el límite de trades, detener análisis
         if strategy and hasattr(strategy, 'has_reached_daily_limit'):
             if strategy.has_reached_daily_limit():
                 # Solo loguear una vez cada minuto para no saturar
@@ -603,8 +617,13 @@ class TradingBot:
                                     close_reason = "Primer trade cerró con TP"
                                     break
                     
-                    # Si se debe cerrar el día, NO analizar mercado
-                    if should_close_day:
+                    # Verificar si la estrategia funciona 24/7
+                    is_24_7_strategy = False
+                    if strategy and hasattr(strategy, 'is_24_7_strategy'):
+                        is_24_7_strategy = strategy.is_24_7_strategy()
+                    
+                    # Si se debe cerrar el día, NO analizar mercado (excepto para estrategias 24/7)
+                    if should_close_day and not is_24_7_strategy:
                         if not hasattr(self, '_last_day_closed_log'):
                             self._last_day_closed_log = 0
                         if (time_module.time() - self._last_day_closed_log) >= 300:  # Cada 5 minutos
@@ -614,9 +633,11 @@ class TradingBot:
                             )
                             self._last_day_closed_log = time_module.time()
                         sleep_interval = 60  # Esperar 1 minuto antes de verificar de nuevo
-                    elif self._is_trading_time():
-                        # Verificar si es hora de cierre automático (4:50 PM NY) - NO colocar nuevas entradas
-                        if self.position_monitor.auto_close_enabled and self.position_monitor.is_auto_close_time():
+                    elif is_24_7_strategy or self._is_trading_time():
+                        # Estrategia 24/7 o está en horario operativo - analizar mercado
+                        
+                        # Para estrategias no-24/7: Verificar si es hora de cierre automático (4:50 PM NY)
+                        if not is_24_7_strategy and self.position_monitor.auto_close_enabled and self.position_monitor.is_auto_close_time():
                             if not hasattr(self, '_last_auto_close_warning'):
                                 self._last_auto_close_warning = 0
                             if (time_module.time() - self._last_auto_close_warning) >= 60:
@@ -628,18 +649,20 @@ class TradingBot:
                             sleep_interval = 5  # Monitorear más frecuentemente para cerrar posiciones
                             continue  # Saltar análisis - solo monitorear y cerrar
                         
-                        # Solo analizar si estamos en horario operativo Y no se debe cerrar el día
+                        # Analizar mercado (para estrategias 24/7 siempre, para otras solo en horario operativo)
                         # Verificar ANTES de analizar si la estrategia necesita monitoreo intensivo
                         needs_intensive = self.strategy_manager.needs_intensive_monitoring(strategy_name)
                         
                         if needs_intensive:
                             # Modo monitoreo intensivo: analizar cada segundo
-                            self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo - Analizando cada segundo...")
+                            mode_msg = "24/7" if is_24_7_strategy else "Horario operativo"
+                            self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Modo monitoreo intensivo activo ({mode_msg}) - Analizando cada segundo...")
                             self._analyze_market()
                             sleep_interval = 1
                         else:
                             # Modo normal: analizar y esperar intervalo normal
-                            self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Horario operativo activo - Analizando mercado...")
+                            mode_msg = "24/7" if is_24_7_strategy else "Horario operativo"
+                            self.logger.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ {mode_msg} activo - Analizando mercado...")
                             self._analyze_market()
                             
                             # Verificar DESPUÉS de analizar si se activó monitoreo intensivo
@@ -655,10 +678,11 @@ class TradingBot:
                                     sleep_interval = 10
                                     self.logger.debug(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Monitoreo intermedio activo (esperando FVG) - Analizando cada 10 segundos...")
                                 else:
-                                    # Modo normal: usar intervalo configurado
-                                    sleep_interval = 60
+                                    # Modo normal: usar intervalo configurado (para 24/7 puede ser más corto)
+                                    sleep_interval = 30 if is_24_7_strategy else 60
                     else:
-                        # Fuera de horario operativo - verificar si es por día no operativo o por hora
+                        # Fuera de horario operativo y no es estrategia 24/7
+                        # Verificar si es por día no operativo o por hora
                         is_trading_day, day_reason, holidays = self.trading_hours.is_trading_day()
                         
                         if not is_trading_day:
@@ -735,6 +759,10 @@ def select_strategy_interactive(config_path: str = "config.yaml") -> str:
         '3': {
             'name': 'default',
             'description': 'Default Strategy (Estrategia por defecto)'
+        },
+        '4': {
+            'name': 'daily_levels_sweep',
+            'description': 'Daily Levels Sweep (Barrido de Niveles Diarios - 24/7)'
         }
     }
     
@@ -761,7 +789,7 @@ def select_strategy_interactive(config_path: str = "config.yaml") -> str:
     
     while True:
         try:
-            choice = input("\n👉 Selecciona una opción (0-3): ").strip()
+            choice = input("\n👉 Selecciona una opción (0-4): ").strip()
             
             if choice == '0':
                 # Usar la estrategia del config sin cambiar
@@ -788,7 +816,7 @@ def select_strategy_interactive(config_path: str = "config.yaml") -> str:
                 
                 return selected['name']
             else:
-                print("❌ Opción inválida. Por favor selecciona un número del 0 al 3.")
+                print("❌ Opción inválida. Por favor selecciona un número del 0 al 4.")
         except KeyboardInterrupt:
             print("\n\n⚠️  Operación cancelada. Usando estrategia del config.")
             return current_strategy
